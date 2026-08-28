@@ -415,11 +415,71 @@ a {
 
 .agent-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, auto) 1fr auto;
+  grid-template-rows: auto auto minmax(120px, auto) 1fr auto;
+  min-height: 0;
 }
 
 .agent-log {
   margin-bottom: 10px;
+}
+
+.section-label {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-trace {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  margin-bottom: 10px;
+  overflow: auto;
+}
+
+.trace-step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid #2a2e37;
+  border-radius: 8px;
+  background: #151b24;
+  padding: 9px;
+}
+
+.trace-step svg {
+  margin-top: 2px;
+  color: #60a5fa;
+}
+
+.trace-step b {
+  display: block;
+  margin-bottom: 3px;
+  color: #e5e7eb;
+  font-size: 12px;
+}
+
+.trace-step p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.trace-step code {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+
+.compact {
+  margin: 0;
 }
 
 .plan-list {

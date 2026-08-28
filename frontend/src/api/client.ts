@@ -96,6 +96,13 @@ export type AgentRunResponse = {
   edit_plan: EditPlan | null
   awaiting_user: boolean
   total_cost: number
+  trace: AgentTraceStep[]
+}
+
+export type AgentTraceStep = {
+  title: string
+  detail: string
+  data?: Record<string, unknown>
 }
 
 export type ApprovalPayload = {

@@ -51,12 +51,36 @@ async def _get_or_create_session(db: AsyncSession, project_id: UUID) -> AgentSes
     return session
 
 
-def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+def _timeline_summary(timeline: dict[str, Any]) -> dict[str, Any]:
+    tracks = timeline.get("tracks", [])
+    return {
+        "duration_ms": int(timeline.get("duration_ms") or 0),
+        "track_count": len(tracks),
+        "clip_count": sum(len(track.get("clips", [])) for track in tracks),
+        "subtitle_count": sum(len(track.get("cues", [])) for track in tracks),
+    }
+
+
+def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     text = content.lower()
     duration = int(timeline.get("duration_ms") or 120000)
     operations: list[dict[str, Any]] = []
+    detected_intents: list[str] = []
+    trace: list[dict[str, Any]] = [
+        {
+            "title": "读取项目时间线",
+            "detail": "已加载当前时间线、轨道、片段和字幕，用于判断可执行的剪辑动作。",
+            "data": _timeline_summary(timeline),
+        },
+        {
+            "title": "解析用户目标",
+            "detail": f"收到指令：{content}",
+            "data": {"matched_keywords": []},
+        },
+    ]
 
     if any(keyword in content for keyword in ["静音", "停顿", "空白"]) or "silence" in text:
+        detected_intents.append("删除静音")
         start_ms = min(1000, max(0, duration - 2000))
         operations.append(
             {
@@ -68,11 +92,13 @@ def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[st
         )
 
     if any(keyword in content for keyword in ["音量", "声音"]) or "volume" in text:
+        detected_intents.append("调整音量")
         operations.append({"type": "SET_VOLUME", "start_ms": 0, "end_ms": -1, "volume": 1.15})
 
     subtitle_track = _subtitle_track(timeline)
     cues = subtitle_track.get("cues", [])
     if cues and (any(keyword in content for keyword in ["字幕", "错字", "文案"]) or "subtitle" in text):
+        detected_intents.append("检查字幕")
         first = cues[0]
         operations.append(
             {
@@ -85,6 +111,7 @@ def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[st
         )
 
     if any(keyword in content for keyword in ["b-roll", "B-roll", "素材", "插入"]) or "broll" in text:
+        detected_intents.append("插入 B-roll")
         candidates = _broll_candidates(timeline)
         if candidates:
             operations.append(
@@ -96,12 +123,43 @@ def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[st
                     "context": "示例计划：在内容转折点插入覆盖素材",
                 }
             )
+        else:
+            trace.append(
+                {
+                    "title": "检查可用素材",
+                    "detail": "用户提到了插入素材，但当前时间线没有可复用的素材候选。",
+                    "data": {"candidate_count": 0},
+                }
+            )
+
+    trace[1]["data"]["matched_keywords"] = detected_intents
+    trace.append(
+        {
+            "title": "生成编辑建议",
+            "detail": f"根据匹配到的目标生成了 {len(operations)} 条待审批操作。",
+            "data": {"operation_types": [operation["type"] for operation in operations]},
+        }
+    )
 
     if not operations:
-        return "我理解了。当前 MVP Agent 会在你提到静音、字幕、音量或 B-roll 时生成可审批的编辑计划。", []
+        trace.append(
+            {
+                "title": "等待更明确的剪辑目标",
+                "detail": "当前 MVP Agent 支持静音、字幕、音量和 B-roll 相关指令。",
+                "data": {},
+            }
+        )
+        return "我理解了。当前 MVP Agent 会在你提到静音、字幕、音量或 B-roll 时生成可审批的编辑计划。", [], trace
 
     summary = f"已生成 {len(operations)} 条编辑建议，等待你确认后应用到时间轴。"
-    return summary, operations
+    trace.append(
+        {
+            "title": "等待人工审批",
+            "detail": "这些操作还没有写入时间线，需要你逐条确认或拒绝后再提交。",
+            "data": {"requires_user_approval": True},
+        }
+    )
+    return summary, operations, trace
 
 
 @router.post("/projects/{project_id}/agent/messages", response_model=AgentRunResponse)
@@ -115,7 +173,7 @@ async def send_agent_message(
         raise HTTPException(status_code=404, detail="Project not found")
     session = await _get_or_create_session(db, project_id)
     timeline = await get_latest_timeline(db, project_id)
-    reply, operations = build_deterministic_plan(payload.content, timeline.timeline_json)
+    reply, operations, trace = build_deterministic_plan(payload.content, timeline.timeline_json)
     edit_plan = None
     awaiting_user = False
 
@@ -147,6 +205,7 @@ async def send_agent_message(
         edit_plan=edit_plan,
         awaiting_user=awaiting_user,
         total_cost=session.total_cost_yuan,
+        trace=trace,
     )
 
 

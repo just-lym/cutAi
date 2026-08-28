@@ -71,6 +71,7 @@ class AgentRunResponse(BaseModel):
     edit_plan: dict[str, Any] | None = None
     awaiting_user: bool
     total_cost: float = 0.0
+    trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentSessionRead(BaseModel):
