@@ -1,0 +1,25 @@
+[database]
+url = "postgresql+asyncpg://aicut:aicut@localhost:5432/aicut"
+
+[redis]
+url = "redis://localhost:6379/0"
+
+[storage]
+data_root = "D:/MyProgramFiles/docker/app/cutAi/data/aicut"
+
+[cloud]
+dashscope_api_key = ""
+dashscope_workspace_id = ""
+video_gen_provider = "dashscope"
+runway_api_key = ""
+pika_api_key = ""
+kling_api_key = ""
+
+[budget]
+monthly_budget_yuan = 100.0
+daily_budget_yuan = 10.0
+
+[ffmpeg]
+bin_dir = "D:/software/ffmpeg/bin"
+hwaccel = ""
+gpu_render_concurrency = 1

@@ -4,39 +4,65 @@ AI multi-agent video editing platform MVP generated from the project prompt.
 
 ## What Works
 
-- Docker runs only dependency services: PostgreSQL and Redis.
 - Backend and frontend run locally for easier development.
+- Docker can still run dependency services: PostgreSQL and Redis.
 - Project creation and timeline initialization.
-- Asset upload into the configured Docker data directory.
+- Asset upload into the configured data directory.
 - FFprobe metadata extraction for video/audio uploads.
 - SRT import into the script/timeline view.
 - Deterministic MVP Agent that creates approval-ready edit plans.
 - Partial approval/rejection and timeline version creation.
 - WebSocket refresh events for timeline and job updates.
 
-## Required Docker Path
+## Local Config File
 
-Docker service data is strictly stored under:
+Backend configuration is stored in:
 
 ```text
-D:\MyProgramFiles\docker\app\cutAi
+backend\config.local.toml
 ```
 
-Data binds are fixed in `docker-compose.yml`:
+Edit this file directly. The backend does not require `.env` or system environment variables for project settings. `backend\config.local.toml` is local-only and ignored by Git; commit changes to `backend\config.example.toml` when changing defaults.
+
+Default config:
+
+```toml
+[database]
+url = "postgresql+asyncpg://aicut:aicut@localhost:5432/aicut"
+
+[redis]
+url = "redis://localhost:6379/0"
+
+[storage]
+data_root = "D:/MyProgramFiles/docker/app/cutAi/data/aicut"
+
+[cloud]
+dashscope_api_key = ""
+dashscope_workspace_id = ""
+video_gen_provider = "dashscope"
+runway_api_key = ""
+pika_api_key = ""
+kling_api_key = ""
+
+[budget]
+monthly_budget_yuan = 100.0
+daily_budget_yuan = 10.0
+
+[ffmpeg]
+bin_dir = "D:/software/ffmpeg/bin"
+hwaccel = ""
+gpu_render_concurrency = 1
+```
+
+## Data Path
+
+The default media/data path is:
 
 ```text
-D:\MyProgramFiles\docker\app\cutAi\data\postgres
-D:\MyProgramFiles\docker\app\cutAi\data\redis
 D:\MyProgramFiles\docker\app\cutAi\data\aicut
 ```
 
-The backend local `.env` uses the same media data path:
-
-```text
-DATA_ROOT=D:/MyProgramFiles/docker/app/cutAi/data/aicut
-```
-
-## Start Dependency Services
+## Start Dependency Services With Docker
 
 ```powershell
 .\start.ps1
@@ -50,7 +76,7 @@ This starts only PostgreSQL and Redis with Docker.
 .\start-backend.ps1
 ```
 
-The script creates `backend\.env` from `backend\.env.example`, creates a virtual environment if needed, installs the backend package, and starts FastAPI at:
+Backend URL:
 
 ```text
 http://localhost:8000/api/health
@@ -62,20 +88,30 @@ http://localhost:8000/api/health
 .\start-frontend.ps1
 ```
 
-Open:
+Frontend URL:
 
 ```text
 http://localhost:5173
 ```
 
-## Stop
+## Stop Docker Services
 
 ```powershell
 .\stop.ps1
 ```
 
+## FFmpeg
+
+FFmpeg is configured through `backend\config.local.toml`:
+
+```toml
+[ffmpeg]
+bin_dir = "D:/software/ffmpeg/bin"
+```
+
+The backend first tries that directory, then falls back to `ffmpeg`/`ffprobe` on `PATH`.
+
 ## Notes
 
-Because the backend now runs locally, real video/audio probing needs a local `ffmpeg`/`ffprobe` executable on `PATH`. If you do not install FFmpeg locally, the app still starts, but video/audio metadata processing will fail for uploaded media. A later worker-container mode can move FFmpeg processing back into Docker while keeping the web backend local.
+Cloud ASR, B-roll generation, Chroma semantic search, and real render export are scaffolded as integration points. The current goal is a stable local development MVP before wiring paid external APIs.
 
-Cloud ASR, B-roll generation, Chroma semantic search, and real render export are scaffolded as integration points. The current goal is a stable local development MVP that uses Docker only for dependency services before wiring paid external APIs.

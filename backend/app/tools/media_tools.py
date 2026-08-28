@@ -2,14 +2,23 @@ import asyncio
 import json
 from pathlib import Path
 
+from app.config import settings
+
 
 class MediaToolError(RuntimeError):
     pass
 
 
+def _tool_path(tool: str) -> str:
+    configured = settings.ffmpeg.ffprobe_path if tool == "ffprobe" else settings.ffmpeg.ffmpeg_path
+    if configured.exists():
+        return str(configured)
+    return tool
+
+
 async def probe_media(file_path: Path) -> dict:
     cmd = [
-        "ffprobe",
+        _tool_path("ffprobe"),
         "-v",
         "quiet",
         "-print_format",
@@ -52,7 +61,7 @@ def video_info_from_probe(probe: dict) -> tuple[int | None, int | None, float | 
 
 async def extract_audio(input_path: Path, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", str(output_path)]
+    cmd = [_tool_path("ffmpeg"), "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", str(output_path)]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,

@@ -2,9 +2,9 @@ $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\backend"
 
-if (-not (Test-Path ".env")) {
-  Copy-Item ".env.example" ".env"
-  Write-Host "Created backend\.env from backend\.env.example."
+if (-not (Test-Path "config.local.toml")) {
+  Copy-Item "config.example.toml" "config.local.toml"
+  Write-Host "Created backend\config.local.toml from backend\config.example.toml."
 }
 
 if (-not (Test-Path ".venv")) {

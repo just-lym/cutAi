@@ -1,26 +1,21 @@
 # AICut Local Development
 
-This project runs dependency services with Docker and runs backend/frontend locally.
+This project runs backend/frontend locally. Docker is only used for dependency services if you want local PostgreSQL and Redis without manual installation.
 
-## 1. Start Docker Services
+## 1. Config File
 
-Docker files are also copied to:
+Backend config lives here:
 
 ```text
-D:\MyProgramFiles\docker\app\cutAi
+backend\config.local.toml
 ```
 
-From this repository:
+Edit that file directly. Project settings are not read from `.env`. `backend\config.local.toml` is local-only and ignored by Git; commit changes to `backend\config.example.toml` when changing defaults.
+
+## 2. Start Docker Services
 
 ```powershell
 .\start.ps1
-```
-
-Or from the Docker directory:
-
-```powershell
-cd D:\MyProgramFiles\docker\app\cutAi
-.\start-services.ps1
 ```
 
 This starts:
@@ -34,7 +29,7 @@ Data stays under:
 D:\MyProgramFiles\docker\app\cutAi\data
 ```
 
-## 2. Start Backend Locally
+## 3. Start Backend Locally
 
 ```powershell
 .\start-backend.ps1
@@ -46,13 +41,7 @@ Backend URL:
 http://localhost:8000/api/health
 ```
 
-The backend writes media files to:
-
-```text
-D:\MyProgramFiles\docker\app\cutAi\data\aicut
-```
-
-## 3. Start Frontend Locally
+## 4. Start Frontend Locally
 
 ```powershell
 .\start-frontend.ps1
@@ -64,6 +53,14 @@ Frontend URL:
 http://localhost:5173
 ```
 
-## FFmpeg Note
+## FFmpeg
 
-PostgreSQL and Redis do not require local installs. Because the backend now runs locally, media probing needs local `ffmpeg` and `ffprobe` on `PATH`. The app can still start without FFmpeg, but video/audio uploads will show metadata processing errors until FFmpeg is available.
+FFmpeg is configured in `backend\config.local.toml`:
+
+```toml
+[ffmpeg]
+bin_dir = "D:/software/ffmpeg/bin"
+```
+
+With this setting, the backend can use `D:\software\ffmpeg\bin\ffmpeg.exe` and `ffprobe.exe` without requiring system `Path` changes.
+
