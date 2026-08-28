@@ -7,8 +7,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents import run_agent_graph
+from app.cloud_api.cost_tracker import record_usage
+from app.config import settings
 from app.database import get_db
-from app.models import AgentSession, EditPlan, EditPlanStatus, Project
+from app.models import AgentSession, Asset, EditPlan, EditPlanStatus, Project
 from app.schemas import (
     AgentMessage,
     AgentRunResponse,
@@ -16,10 +19,7 @@ from app.schemas import (
     ApprovalRequest,
     ApprovalResponse,
 )
-from app.cloud_api.cost_tracker import record_usage
-from app.services.agent_llm import build_llm_plan
 from app.services.executor import ExecutionError, execute_edit_plan, get_latest_timeline
-from app.tools.timeline_tools import validate_edit_plan
 from app.ws.events import manager
 
 router = APIRouter()
@@ -61,6 +61,26 @@ def _timeline_summary(timeline: dict[str, Any]) -> dict[str, Any]:
         "track_count": len(tracks),
         "clip_count": sum(len(track.get("clips", [])) for track in tracks),
         "subtitle_count": sum(len(track.get("cues", [])) for track in tracks),
+    }
+
+
+def _asset_context(asset: Asset) -> dict[str, Any]:
+    return {
+        "id": str(asset.id),
+        "project_id": str(asset.project_id),
+        "type": asset.type.value if hasattr(asset.type, "value") else str(asset.type),
+        "source_type": asset.source_type.value if hasattr(asset.source_type, "value") else str(asset.source_type),
+        "original_name": asset.original_name,
+        "file_path": asset.file_path,
+        "proxy_path": asset.proxy_path,
+        "mime_type": asset.mime_type,
+        "duration_ms": asset.duration_ms,
+        "width": asset.width,
+        "height": asset.height,
+        "frame_rate": asset.frame_rate,
+        "processing_status": asset.processing_status.value
+        if hasattr(asset.processing_status, "value")
+        else str(asset.processing_status),
     }
 
 
@@ -176,47 +196,49 @@ async def send_agent_message(
         raise HTTPException(status_code=404, detail="Project not found")
     session = await _get_or_create_session(db, project_id)
     timeline = await get_latest_timeline(db, project_id)
-    try:
-        llm_result = await build_llm_plan(payload.content, timeline.timeline_json)
-        reply = llm_result.reply
-        operations = llm_result.operations
-        trace = llm_result.trace
-        validation_errors = validate_edit_plan(operations, timeline.timeline_json)
-        if validation_errors:
-            fallback_reply, fallback_operations, fallback_trace = build_deterministic_plan(
-                payload.content,
-                timeline.timeline_json,
-            )
-            trace.append(
-                {
-                    "title": "模型计划校验失败",
-                    "detail": "大模型返回的操作没有通过时间线校验，已使用规则计划兜底。",
-                    "data": {"errors": validation_errors},
-                }
-            )
-            trace.extend(fallback_trace)
-            reply = fallback_reply
-            operations = fallback_operations
+    asset_result = await db.execute(select(Asset).where(Asset.project_id == project_id))
+    assets = [_asset_context(asset) for asset in asset_result.scalars()]
 
-        usage = await record_usage(
-            db,
-            provider="dashscope",
-            service=llm_result.model,
-            project_id=project_id,
-            input_tokens=llm_result.input_tokens,
-            output_tokens=llm_result.output_tokens,
-            request_id=llm_result.request_id,
+    try:
+        final_state = await run_agent_graph(
+            content=payload.content,
+            project_id=str(project_id),
+            project_dir=str(settings.projects_root / str(project_id)),
+            timeline_version=timeline.version,
+            timeline=timeline.timeline_json,
+            assets=assets,
         )
-        session.total_tokens_used += llm_result.input_tokens + llm_result.output_tokens
-        session.total_cost_yuan += usage.cost_yuan
+        edit_plan_payload = final_state.get("edit_plans")
+        reply = final_state.get("reply") or (
+            edit_plan_payload.get("summary") if edit_plan_payload else "Agent 已完成处理。"
+        )
+        operations = list(edit_plan_payload.get("operations") or []) if edit_plan_payload else []
+        conflicts = list(edit_plan_payload.get("conflicts") or []) if edit_plan_payload else []
+        trace = final_state.get("trace", [])
+
+        for usage_record in final_state.get("usage_records", []):
+            usage = await record_usage(
+                db,
+                provider=str(usage_record.get("provider") or "dashscope"),
+                service=str(usage_record.get("model") or "qwen-plus"),
+                project_id=project_id,
+                input_tokens=int(usage_record.get("input_tokens") or 0),
+                output_tokens=int(usage_record.get("output_tokens") or 0),
+                request_id=str(usage_record.get("request_id")) if usage_record.get("request_id") else None,
+            )
+            session.total_tokens_used += int(usage_record.get("input_tokens") or 0) + int(
+                usage_record.get("output_tokens") or 0
+            )
+            session.total_cost_yuan += usage.cost_yuan
     except Exception as exc:
         reply, operations, trace = build_deterministic_plan(payload.content, timeline.timeline_json)
+        conflicts = []
         error_type = type(exc).__name__
         trace.insert(
             0,
             {
-                "title": "大模型调用失败",
-                "detail": "DashScope 调用失败，当前响应来自本地规则计划。",
+                "title": "LangGraph Agent 调用失败",
+                "detail": "多 Agent 图执行失败，当前响应来自本地规则计划。",
                 "data": {"error": f"{error_type}: {exc}"},
             },
         )
@@ -229,9 +251,9 @@ async def send_agent_message(
             base_timeline_version=timeline.version,
             status=EditPlanStatus.WAITING_USER,
             operations=operations,
-            conflicts=[],
+            conflicts=conflicts,
             estimated_cost=0.0,
-            created_by_agent="deterministic-supervisor",
+            created_by_agent="langgraph-review-agent",
         )
         db.add(plan)
         await db.flush()
@@ -239,7 +261,7 @@ async def send_agent_message(
             "id": str(plan.id),
             "summary": reply,
             "operations": operations,
-            "conflicts": [],
+            "conflicts": conflicts,
             "requires_user_approval": True,
         }
         awaiting_user = True

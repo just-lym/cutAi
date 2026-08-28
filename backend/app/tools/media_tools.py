@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from app.config import settings
@@ -112,3 +113,50 @@ async def generate_browser_proxy(input_path: Path, output_path: Path, width: int
     if proc.returncode != 0:
         raise MediaToolError(stderr.decode("utf-8", errors="ignore") or "proxy generation failed")
     return output_path
+
+
+async def detect_silence(
+    input_path: Path,
+    threshold_db: float = -40,
+    min_duration_ms: int = 500,
+) -> list[dict]:
+    cmd = [
+        _tool_path("ffmpeg"),
+        "-i",
+        str(input_path),
+        "-af",
+        f"silencedetect=noise={threshold_db}dB:d={min_duration_ms / 1000}",
+        "-f",
+        "null",
+        "-",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    text = stderr.decode("utf-8", errors="ignore")
+    if proc.returncode != 0:
+        raise MediaToolError(text or "silence detection failed")
+
+    segments: list[dict] = []
+    open_start: float | None = None
+    for line in text.splitlines():
+        start_match = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if start_match:
+            open_start = float(start_match.group(1))
+            continue
+        end_match = re.search(r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)", line)
+        if end_match and open_start is not None:
+            end = float(end_match.group(1))
+            duration = float(end_match.group(2))
+            segments.append(
+                {
+                    "start_ms": int(open_start * 1000),
+                    "end_ms": int(end * 1000),
+                    "duration_ms": int(duration * 1000),
+                }
+            )
+            open_start = None
+    return segments
