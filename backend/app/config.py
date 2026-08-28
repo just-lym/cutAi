@@ -5,7 +5,7 @@ import tomllib
 from pydantic import BaseModel
 
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_CONFIG_PATH = BACKEND_ROOT / "config.local.toml"
 EXAMPLE_CONFIG_PATH = BACKEND_ROOT / "config.example.toml"
 
@@ -25,6 +25,7 @@ class StorageConfig(BaseModel):
 class CloudConfig(BaseModel):
     dashscope_api_key: str = ""
     dashscope_workspace_id: str = ""
+    agent_model: str = "qwen-plus"
     video_gen_provider: str = "dashscope"
     runway_api_key: str = ""
     pika_api_key: str = ""

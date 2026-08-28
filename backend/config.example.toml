@@ -10,6 +10,7 @@ data_root = "D:/MyProgramFiles/docker/app/cutAi/data/aicut"
 [cloud]
 dashscope_api_key = ""
 dashscope_workspace_id = ""
+agent_model = "qwen-plus"
 video_gen_provider = "dashscope"
 runway_api_key = ""
 pika_api_key = ""
