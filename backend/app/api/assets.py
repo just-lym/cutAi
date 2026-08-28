@@ -8,6 +8,7 @@ from uuid import UUID
 
 import aiofiles
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +17,12 @@ from app.database import get_db
 from app.models import Asset, AssetType, ProcessingStatus, Project, TimelineVersion
 from app.schemas import AssetRead
 from app.services.executor import get_latest_timeline
-from app.tools.media_tools import duration_ms_from_probe, probe_media, video_info_from_probe
+from app.tools.media_tools import (
+    duration_ms_from_probe,
+    generate_browser_proxy,
+    probe_media,
+    video_info_from_probe,
+)
 from app.tools.subtitle_tools import parse_srt
 from app.ws.events import manager
 
@@ -51,6 +57,17 @@ def _safe_name(name: str) -> str:
 
 def _relative_to_data_root(path: Path) -> str:
     return path.relative_to(settings.data_root).as_posix()
+
+
+def _asset_abs_path(asset: Asset, prefer_proxy: bool = False) -> Path:
+    rel_path = asset.proxy_path if prefer_proxy and asset.proxy_path else asset.file_path
+    candidate = (settings.data_root / rel_path).resolve()
+    data_root = settings.data_root.resolve()
+    if data_root not in candidate.parents and candidate != data_root:
+        raise HTTPException(status_code=400, detail="Invalid asset path")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Asset file not found")
+    return candidate
 
 
 async def _add_asset_to_timeline(db: AsyncSession, project: Project, asset: Asset, cues: list[dict] | None) -> None:
@@ -129,14 +146,25 @@ async def _process_metadata(path: Path, asset: Asset) -> list[dict] | None:
             asset.height = height
             asset.frame_rate = frame_rate
             asset.metadata_ = {"probe": probe}
+            if asset.type == AssetType.VIDEO:
+                asset.processing_step = "proxy"
+                proxy_path = (
+                    settings.projects_root
+                    / str(asset.project_id)
+                    / "proxies"
+                    / f"{path.stem}_h264.mp4"
+                )
+                await generate_browser_proxy(path, proxy_path)
+                asset.proxy_path = _relative_to_data_root(proxy_path)
         elif asset.type == AssetType.SUBTITLE:
             cues = parse_srt(path.read_text(encoding="utf-8"))
         asset.processing_status = ProcessingStatus.COMPLETED
         asset.processing_step = None
+        asset.processing_error = None
     except Exception as exc:
         asset.processing_status = ProcessingStatus.FAILED
         asset.processing_step = None
-        asset.processing_error = str(exc)
+        asset.processing_error = f"{type(exc).__name__}: {exc}"
     return cues
 
 
@@ -230,3 +258,38 @@ async def asset_status(asset_id: UUID, db: AsyncSession = Depends(get_db)) -> As
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     return asset
+
+
+@router.post("/assets/{asset_id}/reprocess", response_model=AssetRead)
+async def reprocess_asset(asset_id: UUID, db: AsyncSession = Depends(get_db)) -> Asset:
+    asset = await db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = _asset_abs_path(asset)
+    await _process_metadata(path, asset)
+    await db.commit()
+    await db.refresh(asset)
+    await manager.broadcast(
+        str(asset.project_id),
+        "job_progress",
+        {"asset_id": asset.id, "step": asset.processing_step, "progress": 1.0},
+    )
+    return asset
+
+
+@router.get("/assets/{asset_id}/file")
+async def asset_file(asset_id: UUID, db: AsyncSession = Depends(get_db)) -> FileResponse:
+    asset = await db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = _asset_abs_path(asset)
+    return FileResponse(path, media_type=asset.mime_type)
+
+
+@router.get("/assets/{asset_id}/proxy")
+async def asset_proxy(asset_id: UUID, db: AsyncSession = Depends(get_db)) -> FileResponse:
+    asset = await db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = _asset_abs_path(asset, prefer_proxy=True)
+    return FileResponse(path, media_type="video/mp4")

@@ -1,6 +1,6 @@
 import { ChangeEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileUp } from 'lucide-react'
+import { FileUp, RotateCw } from 'lucide-react'
 import { api, type Asset } from '../api/client'
 
 type Props = {
@@ -12,6 +12,14 @@ export function AssetPanel({ projectId, assets }: Props) {
   const queryClient = useQueryClient()
   const upload = useMutation({
     mutationFn: (file: File) => api.assets.upload(projectId, file),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
+    }
+  })
+
+  const reprocess = useMutation({
+    mutationFn: (assetId: string) => api.assets.reprocess(assetId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
       await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
@@ -38,9 +46,16 @@ export function AssetPanel({ projectId, assets }: Props) {
       </div>
       <div className="asset-list">
         {assets.map((asset) => (
-          <div className="asset-row" key={asset.id}>
+          <div className="asset-row" key={asset.id} title={asset.processing_error ?? undefined}>
             <span>{asset.original_name}</span>
-            <small data-status={asset.processing_status}>{asset.processing_status}</small>
+            <div className="asset-actions">
+              <small data-status={asset.processing_status}>{asset.processing_status}</small>
+              {asset.processing_status === 'FAILED' ? (
+                <button className="mini-button" onClick={() => reprocess.mutate(asset.id)}>
+                  <RotateCw size={13} />
+                </button>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>

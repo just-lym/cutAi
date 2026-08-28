@@ -18,9 +18,6 @@ export function Editor() {
   const activeBottomTab = useEditorStore((state) => state.activeBottomTab)
   const setBottomTab = useEditorStore((state) => state.setBottomTab)
   const setSubtitleCues = useEditorStore((state) => state.setSubtitleCues)
-  const isPlaying = useEditorStore((state) => state.isPlaying)
-  const setPlayhead = useEditorStore((state) => state.setPlayhead)
-  const playhead = useEditorStore((state) => state.playheadMs)
   useHotkeys()
 
   const [project, timeline, assets, usage] = useQueries({
@@ -45,14 +42,6 @@ export function Editor() {
   useEffect(() => {
     setSubtitleCues(cues)
   }, [cues, setSubtitleCues])
-
-  useEffect(() => {
-    if (!isPlaying) return
-    const timer = window.setInterval(() => {
-      setPlayhead(playhead + 250)
-    }, 250)
-    return () => window.clearInterval(timer)
-  }, [isPlaying, playhead, setPlayhead])
 
   if (project.isLoading || timeline.isLoading) {
     return (
@@ -89,7 +78,7 @@ export function Editor() {
 
       <section className="editor-grid">
         <AssetPanel projectId={projectId} assets={assets.data ?? []} />
-        <PreviewPanel timeline={timeline.data?.timeline_json} />
+        <PreviewPanel timeline={timeline.data?.timeline_json} assets={assets.data ?? []} />
         <AgentPanel projectId={projectId} />
       </section>
 

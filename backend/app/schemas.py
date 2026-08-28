@@ -44,7 +44,6 @@ class AssetRead(BaseModel):
     processing_status: str
     processing_step: str | None = None
     processing_error: str | None = None
-    metadata_: dict[str, Any] | None = None
 
 
 class TimelineRead(BaseModel):

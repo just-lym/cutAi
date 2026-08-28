@@ -71,3 +71,44 @@ async def extract_audio(input_path: Path, output_path: Path) -> Path:
     if proc.returncode != 0:
         raise MediaToolError(stderr.decode("utf-8", errors="ignore") or "ffmpeg failed")
     return output_path
+
+
+async def generate_browser_proxy(input_path: Path, output_path: Path, width: int = 1280) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    scale = f"scale='min({width},iw)':-2"
+    cmd = [
+        _tool_path("ffmpeg"),
+        "-y",
+        "-i",
+        str(input_path),
+        "-vf",
+        scale,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise MediaToolError(stderr.decode("utf-8", errors="ignore") or "proxy generation failed")
+    return output_path

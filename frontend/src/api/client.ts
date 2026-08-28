@@ -148,7 +148,10 @@ export const api = {
       const fd = new FormData()
       fd.append('file', file)
       return request<Asset>(`/projects/${projectId}/assets/upload`, { method: 'POST', body: fd })
-    }
+    },
+    reprocess: (assetId: string) => request<Asset>(`/assets/${assetId}/reprocess`, { method: 'POST' }),
+    fileUrl: (assetId: string) => `${BASE}/assets/${assetId}/file`,
+    proxyUrl: (assetId: string) => `${BASE}/assets/${assetId}/proxy`
   },
   timeline: {
     get: (projectId: string) => request<TimelineVersion>(`/projects/${projectId}/timeline`),
