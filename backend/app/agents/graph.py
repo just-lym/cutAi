@@ -86,17 +86,53 @@ def _user_request(state: AgentState) -> str:
     return ""
 
 
-def _timeline_summary(timeline: dict[str, Any]) -> dict[str, Any]:
-    tracks = timeline.get("tracks", [])
+def _assets_summary(assets: list[dict[str, Any]]) -> dict[str, Any]:
+    completed = [
+        asset
+        for asset in assets
+        if asset.get("processing_status") == "COMPLETED" and asset.get("duration_ms")
+    ]
+    max_duration_ms = max((int(asset.get("duration_ms") or 0) for asset in completed), default=0)
     return {
-        "duration_ms": int(timeline.get("duration_ms") or 0),
-        "track_count": len(tracks),
-        "clip_count": sum(len(track.get("clips", [])) for track in tracks),
-        "subtitle_count": sum(len(track.get("cues", [])) for track in tracks),
+        "asset_count": len(assets),
+        "completed_media_count": len(completed),
+        "max_asset_duration_ms": max_duration_ms,
+        "media": [
+            {
+                "id": asset.get("id"),
+                "name": asset.get("original_name"),
+                "type": asset.get("type"),
+                "duration_ms": asset.get("duration_ms"),
+                "width": asset.get("width"),
+                "height": asset.get("height"),
+                "frame_rate": asset.get("frame_rate"),
+            }
+            for asset in assets[:20]
+        ],
     }
 
 
-def _timeline_context(timeline: dict[str, Any]) -> dict[str, Any]:
+def _effective_duration_ms(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> int:
+    timeline_duration = int(timeline.get("duration_ms") or 0)
+    asset_duration = int(_assets_summary(assets)["max_asset_duration_ms"])
+    return max(timeline_duration, asset_duration)
+
+
+def _timeline_summary(timeline: dict[str, Any], assets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    asset_list = assets or []
+    tracks = timeline.get("tracks", [])
+    return {
+        "duration_ms": int(timeline.get("duration_ms") or 0),
+        "effective_duration_ms": _effective_duration_ms(timeline, asset_list),
+        "track_count": len(tracks),
+        "clip_count": sum(len(track.get("clips", [])) for track in tracks),
+        "subtitle_count": sum(len(track.get("cues", [])) for track in tracks),
+        "assets": _assets_summary(asset_list),
+    }
+
+
+def _timeline_context(timeline: dict[str, Any], assets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    asset_list = assets or []
     tracks = []
     for track in timeline.get("tracks", []):
         clips = track.get("clips") or []
@@ -113,10 +149,12 @@ def _timeline_context(timeline: dict[str, Any]) -> dict[str, Any]:
         )
     return {
         "duration_ms": int(timeline.get("duration_ms") or 0),
+        "effective_duration_ms": _effective_duration_ms(timeline, asset_list),
         "width": timeline.get("width"),
         "height": timeline.get("height"),
         "frame_rate": timeline.get("frame_rate"),
         "tracks": tracks,
+        "assets": _assets_summary(asset_list),
     }
 
 
@@ -227,7 +265,7 @@ async def supervisor_node(state: AgentState) -> AgentState:
 
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_summary(state.get("timeline", {})),
+        "timeline": _timeline_summary(state.get("timeline", {}), state.get("assets", [])),
         "finished_agents": list(state.get("agent_outputs", {}).keys()),
         "route_history": route_history,
     }
@@ -238,7 +276,8 @@ async def supervisor_node(state: AgentState) -> AgentState:
 - subtitle_agent：字幕分析、纠错、断句、翻译、ASR 生成
 - audio_agent：音频分析、音效检测与删除、音量调整
 - broll_agent：B-roll 素材推荐、插入位置识别、视频生成提示词
-如果已经收集到需要的 specialist 输出，选择 review。如果用户只是询问状态或无可执行目标，选择 respond。
+如果已经收集到需要的 specialist 输出，选择 review。
+如果用户是在询问、分析、解释、让你判断可行性，或当前系统不能真正执行该任务，选择 respond 或让 specialist 返回自然语言建议，不要硬凑审批计划。
 """.strip()
     response, usage = await _call_json_agent(
         "supervisor",
@@ -265,15 +304,32 @@ async def supervisor_node(state: AgentState) -> AgentState:
 
 async def run_subtitle_node(state: AgentState) -> AgentState:
     cues = _subtitle_cues(state.get("timeline", {}))
+    assets = state.get("assets", [])
+    available_media = [
+        {
+            "id": asset.get("id"),
+            "name": asset.get("original_name"),
+            "type": asset.get("type"),
+            "duration_ms": asset.get("duration_ms"),
+            "file_path": _asset_path(asset),
+        }
+        for asset in assets
+        if asset.get("processing_status") == "COMPLETED" and asset.get("type") in {"VIDEO", "AUDIO"}
+    ]
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_context(state.get("timeline", {})),
+        "timeline": _timeline_context(state.get("timeline", {}), assets),
         "subtitles": cues[:50],
+        "assets": _assets_summary(assets),
+        "available_media_for_asr": available_media[:10],
+        "implemented_subtitle_operations": ["UPDATE_SUBTITLE"],
     }
     system_prompt = """
 你是 AICut 的 subtitle Agent，负责字幕分析、断句、纠错和字幕相关编辑建议。
 只输出 JSON：{"summary":string,"operations":[...]}。
 operations 只能使用 UPDATE_SUBTITLE。没有字幕或没有可靠修改时返回空 operations。
+如果用户要求生成新字幕、翻译字幕或英文字幕，但当前没有已有字幕且系统没有提供 ASR/翻译工具结果，请自然说明：时间范围是否有效、是否存在可用媒体、当前缺少的是 ASR/翻译执行链路或字幕来源。不要说缺少音频源，除非 available_media_for_asr 为空。不要编造字幕。
+判断时间范围时优先使用 timeline.effective_duration_ms，而不是只看 duration_ms。
 """.strip()
     response, usage = await _call_json_agent(
         "subtitle_agent",
@@ -293,7 +349,11 @@ operations 只能使用 UPDATE_SUBTITLE。没有字幕或没有可靠修改时�
             state,
             "Subtitle Agent 调用大模型完成",
             outputs["subtitle_agent"]["summary"],
-            {"operation_count": len(outputs["subtitle_agent"]["operations"]), "model": usage["model"]},
+            {
+                "operation_count": len(outputs["subtitle_agent"]["operations"]),
+                "available_media_count": len(available_media),
+                "model": usage["model"],
+            },
         ),
     }
 
@@ -303,6 +363,15 @@ async def run_audio_node(state: AgentState) -> AgentState:
     assets = state.get("assets", [])
     referenced_ids = _referenced_asset_ids(timeline)
     candidate = next((asset for asset in assets if str(asset.get("id")) in referenced_ids), None)
+    if candidate is None:
+        candidate = next(
+            (
+                asset
+                for asset in assets
+                if asset.get("processing_status") == "COMPLETED" and asset.get("type") in {"VIDEO", "AUDIO"}
+            ),
+            None,
+        )
     silence_segments: list[dict[str, Any]] = []
     silence_error = None
     if candidate:
@@ -313,7 +382,7 @@ async def run_audio_node(state: AgentState) -> AgentState:
 
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_context(timeline),
+        "timeline": _timeline_context(timeline, assets),
         "media_asset": {
             "id": candidate.get("id"),
             "name": candidate.get("original_name"),
@@ -329,6 +398,7 @@ async def run_audio_node(state: AgentState) -> AgentState:
 只输出 JSON：{"summary":string,"operations":[...]}。
 DELETE_RANGE 必须来自输入中的 silence_segments，不能凭空编造静音区间。
 可用操作：DELETE_RANGE、SET_VOLUME、FADE_IN、FADE_OUT。没有可靠建议时返回空 operations。
+判断时间范围时优先使用 timeline.effective_duration_ms，而不是只看 duration_ms。
 """.strip()
     response, usage = await _call_json_agent(
         "audio_agent",
@@ -364,7 +434,7 @@ async def run_broll_node(state: AgentState) -> AgentState:
     assets = state.get("assets", [])
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_context(timeline),
+        "timeline": _timeline_context(timeline, assets),
         "available_assets": [
             {
                 "id": asset.get("id"),
@@ -380,6 +450,7 @@ async def run_broll_node(state: AgentState) -> AgentState:
 只输出 JSON：{"summary":string,"operations":[...],"insertions":[...]}。
 如使用现有素材，operations 使用 INSERT_BROLL_OVERLAY。每段 3-6 秒，避免覆盖无素材的位置。
 如果没有合适素材，可在 insertions 中给出 visual_description 和 prompt_en，但不要编造 asset_id。
+判断时间范围时优先使用 timeline.effective_duration_ms，而不是只看 duration_ms。
 """.strip()
     response, usage = await _call_json_agent(
         "broll_agent",
@@ -415,7 +486,7 @@ async def run_review_node(state: AgentState) -> AgentState:
     valid_operations, deterministic_conflicts = _valid_operations(proposed_operations, timeline)
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_summary(timeline),
+        "timeline": _timeline_summary(timeline, state.get("assets", [])),
         "agent_outputs": state.get("agent_outputs", {}),
         "valid_operations": valid_operations,
         "validation_conflicts": deterministic_conflicts,
@@ -425,6 +496,8 @@ async def run_review_node(state: AgentState) -> AgentState:
 职责：合并 specialist 输出，按时间顺序整理，指出冲突，输出最终 EditPlan。
 只输出 JSON：{"plan":{"summary":string,"operations":[...],"conflicts":[...],"requires_user_approval":boolean}}。
 不要输出未通过 validation_conflicts 的操作。
+如果没有 valid_operations，请给自然语言回复，说明当前能做什么、缺什么，不要把回复写成必须提交计划。
+判断时间范围时优先使用 timeline.effective_duration_ms，而不是只看 duration_ms。
 """.strip()
     response, usage = await _call_json_agent(
         "review",
@@ -464,11 +537,12 @@ async def run_review_node(state: AgentState) -> AgentState:
 async def respond_node(state: AgentState) -> AgentState:
     payload = {
         "user_request": _user_request(state),
-        "timeline": _timeline_summary(state.get("timeline", {})),
+        "timeline": _timeline_summary(state.get("timeline", {}), state.get("assets", [])),
     }
     system_prompt = """
 你是 AICut 的 respond Agent。用户没有提出可执行的剪辑计划时，直接给出简短中文回复。
 只输出 JSON：{"reply":string}。
+回复要理解用户自然语言，不要假定用户一定要提交 EditPlan。判断视频长度时使用 timeline.effective_duration_ms。
 """.strip()
     response, usage = await _call_json_agent(
         "respond",
@@ -541,7 +615,13 @@ async def run_agent_graph(
             {
                 "title": "初始化 AgentState",
                 "detail": "已按 03-多Agent系统.md 构建共享状态，准备进入 Supervisor。",
-                "data": {"project_id": project_id, "timeline_version": timeline_version},
+                "data": {
+                    "project_id": project_id,
+                    "timeline_version": timeline_version,
+                    "timeline_duration_ms": int(timeline.get("duration_ms") or 0),
+                    "effective_duration_ms": _effective_duration_ms(timeline, assets),
+                    "asset_count": len(assets),
+                },
             }
         ],
         "route_history": [],
