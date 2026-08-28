@@ -74,6 +74,18 @@ class AgentRunResponse(BaseModel):
     total_cost: float = 0.0
 
 
+class AgentSessionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    user_id: str
+    langgraph_thread_id: str | None = None
+    status: str
+    total_tokens_used: int
+    total_cost_yuan: float
+
+
 class ApprovalRequest(BaseModel):
     approved_indices: list[int] | None = None
     rejected_indices: list[int] | None = None

@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import AgentSession, EditPlan, EditPlanStatus, Project
-from app.schemas import AgentMessage, AgentRunResponse, ApprovalRequest, ApprovalResponse
+from app.schemas import (
+    AgentMessage,
+    AgentRunResponse,
+    AgentSessionRead,
+    ApprovalRequest,
+    ApprovalResponse,
+)
 from app.services.executor import ExecutionError, execute_edit_plan, get_latest_timeline
 from app.ws.events import manager
 
@@ -161,7 +167,7 @@ async def stream_agent_message(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@router.get("/agent/sessions/{session_id}")
+@router.get("/agent/sessions/{session_id}", response_model=AgentSessionRead)
 async def get_session(session_id: UUID, db: AsyncSession = Depends(get_db)) -> AgentSession:
     session = await db.get(AgentSession, session_id)
     if session is None:
