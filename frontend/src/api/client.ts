@@ -150,6 +150,7 @@ export const api = {
       return request<Asset>(`/projects/${projectId}/assets/upload`, { method: 'POST', body: fd })
     },
     reprocess: (assetId: string) => request<Asset>(`/assets/${assetId}/reprocess`, { method: 'POST' }),
+    remove: (assetId: string) => request<{ ok: boolean }>(`/assets/${assetId}`, { method: 'DELETE' }),
     fileUrl: (assetId: string) => `${BASE}/assets/${assetId}/file`,
     proxyUrl: (assetId: string) => `${BASE}/assets/${assetId}/proxy`
   },

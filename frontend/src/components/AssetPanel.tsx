@@ -1,6 +1,6 @@
 import { ChangeEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { FileUp, RotateCw } from 'lucide-react'
+import { FileUp, RotateCw, Trash2 } from 'lucide-react'
 import { api, type Asset } from '../api/client'
 
 type Props = {
@@ -26,9 +26,24 @@ export function AssetPanel({ projectId, assets }: Props) {
     }
   })
 
+  const remove = useMutation({
+    mutationFn: (assetId: string) => api.assets.remove(assetId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
+    }
+  })
+
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (file) upload.mutate(file)
+    event.target.value = ''
+  }
+
+  const onRemove = (asset: Asset) => {
+    if (window.confirm(`删除素材 ${asset.original_name}？`)) {
+      remove.mutate(asset.id)
+    }
   }
 
   return (
@@ -51,10 +66,23 @@ export function AssetPanel({ projectId, assets }: Props) {
             <div className="asset-actions">
               <small data-status={asset.processing_status}>{asset.processing_status}</small>
               {asset.processing_status === 'FAILED' ? (
-                <button className="mini-button" onClick={() => reprocess.mutate(asset.id)}>
+                <button
+                  className="mini-button"
+                  onClick={() => reprocess.mutate(asset.id)}
+                  disabled={reprocess.isPending}
+                  title="重新处理"
+                >
                   <RotateCw size={13} />
                 </button>
               ) : null}
+              <button
+                className="mini-button danger-button"
+                onClick={() => onRemove(asset)}
+                disabled={remove.isPending}
+                title="删除素材"
+              >
+                <Trash2 size={13} />
+              </button>
             </div>
           </div>
         ))}

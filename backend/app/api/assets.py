@@ -3,6 +3,7 @@ import mimetypes
 import re
 import shutil
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from uuid import UUID
 
@@ -68,6 +69,45 @@ def _asset_abs_path(asset: Asset, prefer_proxy: bool = False) -> Path:
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Asset file not found")
     return candidate
+
+
+def _asset_storage_paths(asset: Asset) -> list[Path]:
+    data_root = settings.data_root.resolve()
+    paths: list[Path] = []
+    for rel_path in (asset.file_path, asset.proxy_path):
+        if not rel_path:
+            continue
+        candidate = (settings.data_root / rel_path).resolve()
+        if data_root not in candidate.parents and candidate != data_root:
+            raise HTTPException(status_code=400, detail="Invalid asset path")
+        paths.append(candidate)
+    return paths
+
+
+def _timeline_without_asset(timeline: dict, asset_id: UUID) -> tuple[dict, bool]:
+    next_timeline = deepcopy(timeline)
+    asset_id_text = str(asset_id)
+    changed = False
+    duration_ms = 0
+
+    for track in next_timeline.get("tracks", []):
+        if "clips" in track:
+            clips = track.get("clips") or []
+            kept = [clip for clip in clips if clip.get("asset_id") != asset_id_text]
+            changed = changed or len(kept) != len(clips)
+            track["clips"] = kept
+            duration_ms = max(
+                duration_ms,
+                max((int(clip.get("timeline_end_ms", 0)) for clip in kept), default=0),
+            )
+        if "cues" in track:
+            duration_ms = max(
+                duration_ms,
+                max((int(cue.get("end_ms", 0)) for cue in track.get("cues") or []), default=0),
+            )
+
+    next_timeline["duration_ms"] = duration_ms
+    return next_timeline, changed
 
 
 async def _add_asset_to_timeline(db: AsyncSession, project: Project, asset: Asset, cues: list[dict] | None) -> None:
@@ -275,6 +315,45 @@ async def reprocess_asset(asset_id: UUID, db: AsyncSession = Depends(get_db)) ->
         {"asset_id": asset.id, "step": asset.processing_step, "progress": 1.0},
     )
     return asset
+
+
+@router.delete("/assets/{asset_id}")
+async def delete_asset(asset_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+    asset = await db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    project_id = asset.project_id
+    project = await db.get(Project, project_id)
+    latest = await get_latest_timeline(db, project_id)
+    timeline, timeline_changed = _timeline_without_asset(latest.timeline_json, asset.id)
+
+    if timeline_changed:
+        next_version = TimelineVersion(
+            project_id=project_id,
+            version=latest.version + 1,
+            parent_version_id=latest.id,
+            timeline_json=timeline,
+            change_summary=f"Deleted asset {asset.original_name}",
+            created_by="system",
+        )
+        db.add(next_version)
+        if project is not None:
+            project.current_timeline_version = next_version.version
+            project.duration_ms = int(timeline.get("duration_ms", 0))
+
+    paths = _asset_storage_paths(asset)
+    await db.delete(asset)
+    await db.commit()
+
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    await manager.broadcast(str(project_id), "asset_deleted", {"asset_id": str(asset.id)})
+    return {"ok": True}
 
 
 @router.get("/assets/{asset_id}/file")

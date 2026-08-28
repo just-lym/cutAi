@@ -242,6 +242,26 @@ a {
   color: #cbd5e1;
 }
 
+.mini-button:hover:not(:disabled) {
+  border-color: #64748b;
+  background: #1e293b;
+}
+
+.mini-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.danger-button {
+  border-color: #4c1d24;
+  color: #fca5a5;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: #991b1b;
+  background: #2a1218;
+}
+
 .preview-panel {
   display: grid;
   grid-template-rows: 1fr auto;
