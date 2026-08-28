@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aicut
+      POSTGRES_PASSWORD: aicut
+      POSTGRES_DB: aicut
+    ports:
+      - "5432:5432"
+    volumes:
+      - "D:/MyProgramFiles/docker/app/cutAi/data/postgres:/var/lib/postgresql/data"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - "D:/MyProgramFiles/docker/app/cutAi/data/redis:/data"
+    command: redis-server --appendonly yes
