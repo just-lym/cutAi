@@ -20,12 +20,16 @@ function itemStyle(start: number, end: number, duration: number, color: string) 
 
 function Track({ track, duration }: { track: TimelineTrack; duration: number }) {
   const color = COLORS[track.type] ?? '#64748b'
+  const selectedClipIds = useEditorStore((state) => state.selectedClipIds)
+  const selectClip = useEditorStore((state) => state.selectClip)
+  const setPlayhead = useEditorStore((state) => state.setPlayhead)
   const items = track.cues?.map((cue) => ({ id: cue.id, start: cue.start_ms, end: cue.end_ms, label: cue.text })) ??
     track.clips?.map((clip) => ({
       id: clip.id,
       start: clip.timeline_start_ms ?? 0,
       end: clip.timeline_end_ms ?? 0,
-      label: clip.asset_id?.slice(0, 8) ?? 'clip'
+      label: clip.asset_id?.slice(0, 8) ?? 'clip',
+      selectable: true
     })) ??
     []
 
@@ -34,7 +38,19 @@ function Track({ track, duration }: { track: TimelineTrack; duration: number }) 
       <span className="track-label">{track.name}</span>
       <div className="track-lane">
         {items.map((item) => (
-          <b key={item.id} style={itemStyle(item.start, item.end, duration, color)} title={item.label}>
+          <b
+            key={item.id}
+            className={selectedClipIds.includes(item.id) ? 'selected' : ''}
+            style={itemStyle(item.start, item.end, duration, color)}
+            title={item.label}
+            onClick={(event) => {
+              event.stopPropagation()
+              if ('selectable' in item) {
+                selectClip(item.id, event.shiftKey)
+                setPlayhead(item.start)
+              }
+            }}
+          >
             {item.label}
           </b>
         ))}

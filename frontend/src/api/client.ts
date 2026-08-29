@@ -37,6 +37,8 @@ export type Clip = {
   source_in_ms?: number
   source_out_ms?: number
   volume?: number
+  transform?: Record<string, unknown>
+  effects?: Record<string, unknown>[]
 }
 
 export type SubtitleCue = {
@@ -88,15 +90,12 @@ export type EditPlan = {
   operations: EditOperation[]
   conflicts: string[]
   requires_user_approval: boolean
+  rendered_files?: string[]
 }
 
-export type AgentRunResponse = {
-  session_id: string
-  reply: string
-  edit_plan: EditPlan | null
-  awaiting_user: boolean
-  total_cost: number
-  trace: AgentTraceStep[]
+export type TimelineCommitPayload = {
+  operations: EditOperation[]
+  change_summary?: string
 }
 
 export type AgentTraceStep = {
@@ -127,6 +126,47 @@ export type UsageSummary = {
   budget_remaining: number
 }
 
+export type Job = {
+  id: string
+  project_id: string
+  asset_id: string | null
+  type: string
+  status: string
+  progress: number
+  step: string | null
+  error: string | null
+  output: Record<string, unknown> | null
+}
+
+export type RenderOptions = {
+  width?: number
+  height?: number
+  frame_rate?: number
+  output_path?: string
+}
+
+export type RenderPathResponse = {
+  path: string | null
+}
+
+export type AgentStreamDone = {
+  session_id: string
+  total_cost: number
+}
+
+export type AgentStreamHandlers = {
+  onThinking?: (event: Record<string, unknown>) => void
+  onStatus?: (event: Record<string, unknown>) => void
+  onToolCall?: (event: Record<string, unknown>) => void
+  onProgress?: (event: Record<string, unknown>) => void
+  onPreviewReady?: (event: Record<string, unknown>) => void
+  onTrace?: (step: AgentTraceStep) => void
+  onPlan?: (plan: EditPlan) => void
+  onToken?: (content: string) => void
+  onDone?: (event: AgentStreamDone) => void
+  onError?: (message: string) => void
+}
+
 const BASE = '/api'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -140,6 +180,77 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(err.detail || res.statusText)
   }
   return res.json() as Promise<T>
+}
+
+function dispatchAgentEvent(
+  rawEvent: string,
+  handlers: AgentStreamHandlers
+) {
+  const lines = rawEvent.split(/\r?\n/)
+  let eventName = 'message'
+  const dataLines: string[] = []
+  for (const line of lines) {
+    if (line.startsWith('event:')) {
+      eventName = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  const rawData = dataLines.join('\n')
+  const data = rawData ? JSON.parse(rawData) : {}
+  if (eventName === 'thinking') {
+    handlers.onThinking?.(data)
+  } else if (eventName === 'status') {
+    handlers.onStatus?.(data)
+  } else if (eventName === 'tool_call') {
+    handlers.onToolCall?.(data)
+  } else if (eventName === 'progress') {
+    handlers.onProgress?.(data)
+  } else if (eventName === 'preview_ready') {
+    handlers.onPreviewReady?.(data)
+  } else if (eventName === 'trace') {
+    handlers.onTrace?.(data as AgentTraceStep)
+  } else if (eventName === 'plan') {
+    handlers.onPlan?.(data as EditPlan)
+  } else if (eventName === 'token') {
+    handlers.onToken?.(String(data.content ?? ''))
+  } else if (eventName === 'done') {
+    handlers.onDone?.(data as AgentStreamDone)
+  } else if (eventName === 'error') {
+    handlers.onError?.(String(data.message ?? 'Agent 流式请求失败'))
+  }
+}
+
+async function streamAgentMessage(projectId: string, content: string, handlers: AgentStreamHandlers) {
+  const res = await fetch(`${BASE}/projects/${projectId}/agent/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content })
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || res.statusText)
+  }
+  if (!res.body) {
+    throw new Error('当前浏览器不支持流式响应')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done })
+      const parts = buffer.split(/\r?\n\r?\n/)
+      buffer = parts.pop() ?? ''
+      for (const part of parts) {
+        if (part.trim()) dispatchAgentEvent(part, handlers)
+      }
+    }
+    if (done) break
+  }
+  if (buffer.trim()) dispatchAgentEvent(buffer, handlers)
 }
 
 export const api = {
@@ -163,14 +274,13 @@ export const api = {
   },
   timeline: {
     get: (projectId: string) => request<TimelineVersion>(`/projects/${projectId}/timeline`),
-    commit: (projectId: string, operations: EditOperation[]) =>
+    commit: (projectId: string, payload: TimelineCommitPayload) =>
       request<TimelineVersion>(`/projects/${projectId}/timeline/commit`, {
         method: 'POST',
-        body: JSON.stringify({ operations })
+        body: JSON.stringify(payload)
       })
   },
   subtitles: {
-    list: (projectId: string) => request<SubtitleCue[]>(`/projects/${projectId}/subtitles`),
     update: (projectId: string, cueId: string, data: Partial<SubtitleCue>) =>
       request(`/projects/${projectId}/subtitles/${cueId}`, {
         method: 'PUT',
@@ -179,39 +289,39 @@ export const api = {
     remove: (projectId: string, cueId: string) =>
       request(`/projects/${projectId}/subtitles/${cueId}`, { method: 'DELETE' })
   },
-  broll: {
-    analyze: (projectId: string) =>
-      request<{ positions: Record<string, unknown>[] }>(`/projects/${projectId}/broll/analyze`, {
-        method: 'POST',
-        body: '{}'
-      }),
-    searchLibrary: (projectId: string, query: string, limit = 6) =>
-      request<{ candidates: Record<string, unknown>[] }>(`/projects/${projectId}/broll/search-library`, {
-        method: 'POST',
-        body: JSON.stringify({ query, limit })
-      }),
-    select: (projectId: string, assetId: string, positionMs: number, durationMs: number) =>
-      request<{ ok: boolean; operation: EditOperation }>(`/projects/${projectId}/broll/select`, {
-        method: 'POST',
-        body: JSON.stringify({ asset_id: assetId, position_ms: positionMs, duration_ms: durationMs })
-      })
-  },
   agent: {
-    send: (projectId: string, content: string) =>
-      request<AgentRunResponse>(`/projects/${projectId}/agent/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ content })
-      }),
+    stream: streamAgentMessage,
     approve: (planId: string, payload?: ApprovalPayload) =>
       request<ApprovalResponse>(`/agent/runs/${planId}/approve`, {
         method: 'POST',
         body: JSON.stringify(payload ?? {})
       }),
-    reject: (planId: string) => request(`/agent/runs/${planId}/reject`, { method: 'POST' })
+    undo: (planId: string) =>
+      request<{ ok: boolean; timeline_version: number; plan_status: string }>(`/agent/runs/${planId}/undo`, {
+        method: 'POST'
+      })
   },
   render: {
-    preview: (projectId: string) => request(`/projects/${projectId}/previews`, { method: 'POST' }),
-    exports: (projectId: string) => request(`/projects/${projectId}/exports`, { method: 'POST' })
+    chooseSavePath: (defaultName: string) =>
+      request<RenderPathResponse>('/render/save-path', {
+        method: 'POST',
+        body: JSON.stringify({ default_name: defaultName })
+      }),
+    preview: (projectId: string, options?: RenderOptions) =>
+      request<Job>(`/projects/${projectId}/previews`, {
+        method: 'POST',
+        body: JSON.stringify(options ?? {})
+      }),
+    exports: (projectId: string, options?: RenderOptions) =>
+      request<Job>(`/projects/${projectId}/exports`, {
+        method: 'POST',
+        body: JSON.stringify(options ?? {})
+      }),
+    job: (jobId: string) => request<Job>(`/jobs/${jobId}`),
+    cancel: (jobId: string) => request<{ ok: boolean; status: string; stopped_process?: boolean }>(
+      `/jobs/${jobId}/cancel`,
+      { method: 'POST' }
+    )
   },
   usage: {
     summary: () => request<UsageSummary>('/usage/summary')

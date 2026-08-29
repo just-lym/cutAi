@@ -1,3 +1,4 @@
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,10 +11,11 @@ from app.schemas import BrollSearchRequest, BrollSelectRequest
 from app.services.executor import get_latest_timeline
 
 router = APIRouter()
+DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 @router.post("/projects/{project_id}/broll/analyze")
-async def analyze_broll(project_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+async def analyze_broll(project_id: UUID, db: DbSession) -> dict:
     timeline = await get_latest_timeline(db, project_id)
     duration = int(timeline.timeline_json.get("duration_ms") or 120000)
     positions = [
@@ -34,7 +36,7 @@ async def analyze_broll(project_id: UUID, db: AsyncSession = Depends(get_db)) ->
 async def search_library(
     project_id: UUID,
     payload: BrollSearchRequest,
-    db: AsyncSession = Depends(get_db),
+    db: DbSession,
 ) -> dict:
     result = await db.execute(select(Asset).where(Asset.project_id == project_id).limit(payload.limit))
     candidates = [
@@ -54,7 +56,7 @@ async def search_library(
 async def select_broll(
     project_id: UUID,
     payload: BrollSelectRequest,
-    db: AsyncSession = Depends(get_db),
+    db: DbSession,
 ) -> dict:
     asset = await db.get(Asset, payload.asset_id)
     if asset is None or asset.project_id != project_id:
@@ -68,13 +70,3 @@ async def select_broll(
             "duration_ms": payload.duration_ms,
         },
     }
-
-
-@router.post("/projects/{project_id}/broll/generate")
-async def generate_broll(project_id: UUID) -> dict:
-    return {"ok": False, "detail": "External video generation provider is scaffolded but not enabled in MVP."}
-
-
-@router.post("/projects/{project_id}/broll/search-web")
-async def search_web(project_id: UUID) -> dict:
-    return {"candidates": [], "detail": "Web stock search is intentionally left as an integration point."}

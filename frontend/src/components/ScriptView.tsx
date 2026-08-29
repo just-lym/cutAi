@@ -9,6 +9,15 @@ type Props = {
   cues: SubtitleCue[]
 }
 
+function formatRange(cue: SubtitleCue) {
+  return `${(cue.start_ms / 1000).toFixed(1)}s-${(cue.end_ms / 1000).toFixed(1)}s`
+}
+
+function cuePosition(cue: SubtitleCue) {
+  const position = cue.style?.position ?? cue.style?.placement
+  return typeof position === 'string' ? position : 'auto'
+}
+
 export function ScriptView({ projectId, cues }: Props) {
   const [query, setQuery] = useState('')
   const queryClient = useQueryClient()
@@ -51,15 +60,21 @@ export function ScriptView({ projectId, cues }: Props) {
               setPlayhead(cue.start_ms)
             }}
           >
-            <time>{Math.round(cue.start_ms / 1000)}s</time>
-            <textarea
-              defaultValue={cue.text}
-              onBlur={(event) => {
-                if (event.currentTarget.value !== cue.text) {
-                  update.mutate({ cue, text: event.currentTarget.value })
-                }
-              }}
-            />
+            <time>
+              <span>{Math.round(cue.start_ms / 1000)}s</span>
+              <small>{cuePosition(cue)}</small>
+            </time>
+            <div className="cue-body">
+              <textarea
+                defaultValue={cue.text}
+                onBlur={(event) => {
+                  if (event.currentTarget.value !== cue.text) {
+                    update.mutate({ cue, text: event.currentTarget.value })
+                  }
+                }}
+              />
+              <small className="cue-meta">{formatRange(cue)} · {cue.id}</small>
+            </div>
             <button className="icon-button" onClick={() => remove.mutate(cue.id)}>
               <Trash2 size={16} />
             </button>

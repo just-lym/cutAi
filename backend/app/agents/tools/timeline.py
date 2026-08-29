@@ -2,7 +2,7 @@ from langchain_core.tools import tool
 
 from app.agents.tools.context import AgentToolContext
 from app.agents.tools.schema import AgentTool
-from app.tools.timeline_tools import validate_edit_plan
+from app.tools.timeline_tools import SUPPORTED_OPERATIONS, validate_edit_plan
 
 
 def build_timeline_tools(context: AgentToolContext) -> list[AgentTool]:
@@ -44,4 +44,13 @@ def build_timeline_tools(context: AgentToolContext) -> list[AgentTool]:
         errors = validate_edit_plan(operations, context.timeline)
         return {"ok": not errors, "errors": errors, "operation_count": len(operations)}
 
-    return [get_project_timeline, validate_edit_operations]
+    @tool("get_supported_edit_operations")
+    async def get_supported_edit_operations() -> dict:
+        """读取当前系统支持的可审批时间线操作类型。生成 EditPlan 前可以调用。"""
+        return {
+            "ok": True,
+            "operations": sorted(SUPPORTED_OPERATIONS),
+            "policy": "Agent must propose operations for review; direct timeline writes are not allowed.",
+        }
+
+    return [get_project_timeline, validate_edit_operations, get_supported_edit_operations]

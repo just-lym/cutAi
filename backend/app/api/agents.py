@@ -1,5 +1,7 @@
+import asyncio
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,15 +9,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import run_agent_graph
+from app.agents import stream_agent_graph
 from app.cloud_api.cost_tracker import record_usage
 from app.config import settings
 from app.database import get_db
-from app.models import AgentSession, Asset, EditPlan, EditPlanStatus, Project
+from app.models import AgentSession, Asset, EditPlan, EditPlanStatus, Project, TimelineVersion
 from app.schemas import (
     AgentMessage,
-    AgentRunResponse,
-    AgentSessionRead,
     ApprovalRequest,
     ApprovalResponse,
 )
@@ -23,20 +23,22 @@ from app.services.executor import ExecutionError, execute_edit_plan, get_latest_
 from app.ws.events import manager
 
 router = APIRouter()
+DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-def _subtitle_track(timeline: dict[str, Any]) -> dict[str, Any]:
-    return next(track for track in timeline.get("tracks", []) if track.get("id") == "subtitles")
+@dataclass
+class AgentRunResult:
+    session_id: UUID
+    reply: str
+    edit_plan: dict[str, Any] | None
+    awaiting_user: bool
+    total_cost: float
+    trace: list[dict[str, Any]]
+    rendered_files: list[str]
 
 
-def _broll_candidates(timeline: dict[str, Any]) -> list[str]:
-    ids: list[str] = []
-    for track in timeline.get("tracks", []):
-        for clip in track.get("clips", []):
-            asset_id = clip.get("asset_id")
-            if asset_id and asset_id not in ids:
-                ids.append(asset_id)
-    return ids
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
 async def _get_or_create_session(db: AsyncSession, project_id: UUID) -> AgentSession:
@@ -84,11 +86,10 @@ def _asset_context(asset: Asset) -> dict[str, Any]:
     }
 
 
-def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    text = content.lower()
-    duration = int(timeline.get("duration_ms") or 120000)
-    operations: list[dict[str, Any]] = []
-    detected_intents: list[str] = []
+def build_agent_failure_response(
+    content: str,
+    timeline: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     trace: list[dict[str, Any]] = [
         {
             "title": "读取项目时间线",
@@ -96,164 +97,68 @@ def build_deterministic_plan(content: str, timeline: dict[str, Any]) -> tuple[st
             "data": _timeline_summary(timeline),
         },
         {
-            "title": "解析用户目标",
+            "title": "等待 Agent 恢复",
             "detail": f"收到指令：{content}",
-            "data": {"matched_keywords": []},
+            "data": {"mode": "agentic_only"},
         },
     ]
-
-    if any(keyword in content for keyword in ["静音", "停顿", "空白"]) or "silence" in text:
-        detected_intents.append("删除静音")
-        start_ms = min(1000, max(0, duration - 2000))
-        operations.append(
-            {
-                "type": "DELETE_RANGE",
-                "start_ms": start_ms,
-                "end_ms": min(start_ms + 1000, duration),
-                "reason": "示例计划：删除检测到的短静音段",
-            }
-        )
-
-    if any(keyword in content for keyword in ["音量", "声音"]) or "volume" in text:
-        detected_intents.append("调整音量")
-        operations.append({"type": "SET_VOLUME", "start_ms": 0, "end_ms": -1, "volume": 1.15})
-
-    subtitle_track = _subtitle_track(timeline)
-    cues = subtitle_track.get("cues", [])
-    if cues and (any(keyword in content for keyword in ["字幕", "错字", "文案"]) or "subtitle" in text):
-        detected_intents.append("检查字幕")
-        first = cues[0]
-        operations.append(
-            {
-                "type": "UPDATE_SUBTITLE",
-                "cue_id": first["id"],
-                "text": first["text"].strip(),
-                "start_ms": first["start_ms"],
-                "end_ms": first["end_ms"],
-            }
-        )
-
-    if any(keyword in content for keyword in ["b-roll", "B-roll", "素材", "插入"]) or "broll" in text:
-        detected_intents.append("插入 B-roll")
-        candidates = _broll_candidates(timeline)
-        if candidates:
-            operations.append(
-                {
-                    "type": "INSERT_BROLL_OVERLAY",
-                    "asset_id": candidates[0],
-                    "position_ms": min(30000, max(0, duration // 3)),
-                    "duration_ms": 4000,
-                    "context": "示例计划：在内容转折点插入覆盖素材",
-                }
-            )
-        else:
-            trace.append(
-                {
-                    "title": "检查可用素材",
-                    "detail": "用户提到了插入素材，但当前时间线没有可复用的素材候选。",
-                    "data": {"candidate_count": 0},
-                }
-            )
-
-    trace[1]["data"]["matched_keywords"] = detected_intents
     trace.append(
         {
-            "title": "生成编辑建议",
-            "detail": f"根据匹配到的目标生成了 {len(operations)} 条待审批操作。",
-            "data": {"operation_types": [operation["type"] for operation in operations]},
+            "title": "未生成本地伪计划",
+            "detail": "当前项目只接受 Main Agent 和工具调用产出的剪辑建议；本地兜底不会按关键词伪造操作。",
+            "data": {},
         }
     )
-
-    if not operations:
-        trace.append(
-            {
-                "title": "等待更明确的剪辑目标",
-                "detail": "当前 MVP Agent 支持静音、字幕、音量和 B-roll 相关指令。",
-                "data": {},
-            }
-        )
-        return "我理解了。当前 MVP Agent 会在你提到静音、字幕、音量或 B-roll 时生成可审批的编辑计划。", [], trace
-
-    summary = f"已生成 {len(operations)} 条编辑建议，等待你确认后应用到时间轴。"
-    trace.append(
-        {
-            "title": "等待人工审批",
-            "detail": "这些操作还没有写入时间线，需要你逐条确认或拒绝后再提交。",
-            "data": {"requires_user_approval": True},
-        }
-    )
-    return summary, operations, trace
+    return "Agent 执行失败，未生成剪辑计划。请检查模型服务或稍后重试。", [], trace
 
 
-@router.post("/projects/{project_id}/agent/messages", response_model=AgentRunResponse)
-async def send_agent_message(
+async def _record_agent_usage(
+    db: AsyncSession,
     project_id: UUID,
-    payload: AgentMessage,
-    db: AsyncSession = Depends(get_db),
-) -> AgentRunResponse:
-    project = await db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    session = await _get_or_create_session(db, project_id)
-    timeline = await get_latest_timeline(db, project_id)
-    asset_result = await db.execute(select(Asset).where(Asset.project_id == project_id))
-    assets = [_asset_context(asset) for asset in asset_result.scalars()]
+    session: AgentSession,
+    usage_records: list[dict[str, Any]],
+) -> None:
+    for usage_record in usage_records:
+        usage = await record_usage(
+            db,
+            provider=str(usage_record.get("provider") or "dashscope"),
+            service=str(usage_record.get("model") or "qwen-plus"),
+            project_id=project_id,
+            input_tokens=int(usage_record.get("input_tokens") or 0),
+            output_tokens=int(usage_record.get("output_tokens") or 0),
+            request_id=str(usage_record.get("request_id")) if usage_record.get("request_id") else None,
+        )
+        session.total_tokens_used += int(usage_record.get("input_tokens") or 0) + int(
+            usage_record.get("output_tokens") or 0
+        )
+        session.total_cost_yuan += usage.cost_yuan
 
-    try:
-        final_state = await run_agent_graph(
-            content=payload.content,
-            project_id=str(project_id),
-            project_dir=str(settings.projects_root / str(project_id)),
-            timeline_version=timeline.version,
-            timeline=timeline.timeline_json,
-            assets=assets,
-        )
-        edit_plan_payload = final_state.get("edit_plans")
-        reply = final_state.get("reply") or (
-            edit_plan_payload.get("summary") if edit_plan_payload else "Agent 已完成处理。"
-        )
-        operations = list(edit_plan_payload.get("operations") or []) if edit_plan_payload else []
-        conflicts = list(edit_plan_payload.get("conflicts") or []) if edit_plan_payload else []
-        trace = final_state.get("trace", [])
 
-        for usage_record in final_state.get("usage_records", []):
-            usage = await record_usage(
-                db,
-                provider=str(usage_record.get("provider") or "dashscope"),
-                service=str(usage_record.get("model") or "qwen-plus"),
-                project_id=project_id,
-                input_tokens=int(usage_record.get("input_tokens") or 0),
-                output_tokens=int(usage_record.get("output_tokens") or 0),
-                request_id=str(usage_record.get("request_id")) if usage_record.get("request_id") else None,
-            )
-            session.total_tokens_used += int(usage_record.get("input_tokens") or 0) + int(
-                usage_record.get("output_tokens") or 0
-            )
-            session.total_cost_yuan += usage.cost_yuan
-    except Exception as exc:
-        reply, operations, trace = build_deterministic_plan(payload.content, timeline.timeline_json)
-        conflicts = []
-        error_type = type(exc).__name__
-        trace.insert(
-            0,
-            {
-                "title": "LangGraph Agent 调用失败",
-                "detail": "多 Agent 图执行失败，当前响应来自本地规则计划。",
-                "data": {"error": f"{error_type}: {exc}"},
-            },
-        )
+async def _persist_agent_result(
+    db: AsyncSession,
+    project_id: UUID,
+    session: AgentSession,
+    timeline_version: int,
+    reply: str,
+    operations: list[dict[str, Any]],
+    conflicts: list[str],
+    trace: list[dict[str, Any]],
+    usage_records: list[dict[str, Any]],
+    rendered_files: list[str] | None = None,
+) -> AgentRunResult:
+    await _record_agent_usage(db, project_id, session, usage_records)
+
     edit_plan = None
     awaiting_user = False
-
     if operations:
         plan = EditPlan(
             project_id=project_id,
-            base_timeline_version=timeline.version,
+            base_timeline_version=timeline_version,
             status=EditPlanStatus.WAITING_USER,
             operations=operations,
             conflicts=conflicts,
             estimated_cost=0.0,
-            created_by_agent="langgraph-review-agent",
+            created_by_agent="main-creative-agent",
         )
         db.add(plan)
         await db.flush()
@@ -263,50 +168,199 @@ async def send_agent_message(
             "operations": operations,
             "conflicts": conflicts,
             "requires_user_approval": True,
+            "rendered_files": rendered_files or [],
         }
         awaiting_user = True
 
     await db.commit()
-    return AgentRunResponse(
+    return AgentRunResult(
         session_id=session.id,
         reply=reply,
         edit_plan=edit_plan,
         awaiting_user=awaiting_user,
         total_cost=session.total_cost_yuan,
         trace=trace,
+        rendered_files=rendered_files or [],
     )
+
+
+def _agent_result_from_state(
+    final_state: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    edit_plan_payload = final_state.get("edit_plans")
+    reply = final_state.get("reply") or (
+        edit_plan_payload.get("summary") if edit_plan_payload else "Agent 已完成处理。"
+    )
+    operations = list(edit_plan_payload.get("operations") or []) if edit_plan_payload else []
+    conflicts = list(edit_plan_payload.get("conflicts") or []) if edit_plan_payload else []
+    trace = list(final_state.get("trace") or [])
+    usage_records = list(final_state.get("usage_records") or [])
+    rendered_files = list(edit_plan_payload.get("rendered_files") or []) if edit_plan_payload else []
+    return str(reply), operations, conflicts, trace, usage_records, rendered_files
 
 
 @router.post("/projects/{project_id}/agent/stream")
 async def stream_agent_message(
     project_id: UUID,
     payload: AgentMessage,
-    db: AsyncSession = Depends(get_db),
+    db: DbSession,
 ) -> StreamingResponse:
+    project = await db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    session = await _get_or_create_session(db, project_id)
+    timeline = await get_latest_timeline(db, project_id)
+    asset_result = await db.execute(select(Asset).where(Asset.project_id == project_id))
+    assets = [_asset_context(asset) for asset in asset_result.scalars()]
+
     async def event_stream():
-        yield "event: thinking\ndata: {\"agent\":\"supervisor\"}\n\n"
-        response = await send_agent_message(project_id, payload, db)
+        yield _sse("thinking", {"agent": "main_agent", "detail": "开始读取项目状态并运行 Main Creative Agent。"})
+        yield _sse("progress", {"stage": "start", "detail": "已提交给 Agent，正在准备项目上下文。", "progress": 0.05})
+        final_state: dict[str, Any] | None = None
+        streamed_trace_count = 0
+
+        async def run_graph() -> asyncio.Queue[tuple[str, dict[str, Any]]]:
+            queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+
+            async def producer() -> None:
+                nonlocal final_state, streamed_trace_count
+                try:
+                    async for state in stream_agent_graph(
+                        content=payload.content,
+                        project_id=str(project_id),
+                        project_dir=str(settings.projects_root / str(project_id)),
+                        timeline_version=timeline.version,
+                        timeline=timeline.timeline_json,
+                        assets=assets,
+                    ):
+                        final_state = dict(state)
+                        trace_steps = list(final_state.get("trace") or [])
+                        for step in trace_steps[streamed_trace_count:]:
+                            step_data = step.get("data") if isinstance(step, dict) else {}
+                            if isinstance(step_data, dict):
+                                for tool_call in step_data.get("tool_calls") or []:
+                                    await queue.put(
+                                        (
+                                            "tool_call",
+                                            {
+                                                "tool": tool_call.get("name") or tool_call.get("tool") or "unknown",
+                                                "detail": f"Agent 调用了 {tool_call.get('name') or tool_call.get('tool') or 'unknown'}",
+                                                "agent": step_data.get("agent"),
+                                            },
+                                        )
+                                    )
+                            await queue.put(("trace", step))
+                        streamed_trace_count = len(trace_steps)
+                    await queue.put(("graph_done", {}))
+                except Exception as exc:  # noqa: BLE001 - stream reports graph failures to client.
+                    await queue.put(("graph_error", {"message": f"{type(exc).__name__}: {exc}"}))
+
+            asyncio.create_task(producer())
+            return queue
+
+        try:
+            queue = await run_graph()
+            heartbeat_count = 0
+            while True:
+                try:
+                    event, data = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except TimeoutError:
+                    heartbeat_count += 1
+                    yield _sse(
+                        "status",
+                        {
+                            "agent": "main_agent",
+                            "detail": "Agent 正在调用模型或工具，任务仍在进行中。",
+                            "elapsed_seconds": heartbeat_count * 2,
+                        },
+                    )
+                    yield _sse(
+                        "progress",
+                        {
+                            "stage": "running",
+                            "detail": "Agent 仍在运行，可能正在等待模型响应或 FFmpeg 工具完成。",
+                            "elapsed_seconds": heartbeat_count * 2,
+                            "progress": min(0.85, 0.08 + heartbeat_count * 0.03),
+                        },
+                    )
+                    continue
+                if event == "graph_done":
+                    break
+                if event == "graph_error":
+                    raise RuntimeError(data["message"])
+                yield _sse(event, data)
+
+            if final_state is None:
+                raise RuntimeError("Agent stream finished without final state")
+
+            yield _sse("progress", {"stage": "review", "detail": "Agent 已完成思考，正在保存可审批结果。", "progress": 0.9})
+            reply, operations, conflicts, trace, usage_records, rendered_files = _agent_result_from_state(final_state)
+            response = await _persist_agent_result(
+                db,
+                project_id,
+                session,
+                timeline.version,
+                reply,
+                operations,
+                conflicts,
+                trace,
+                usage_records,
+                rendered_files,
+            )
+        except Exception as exc:  # noqa: BLE001 - stream should degrade into a usable local plan.
+            await db.rollback()
+            error_type = type(exc).__name__
+            yield _sse(
+                "trace",
+                {
+                    "title": "LangGraph Agent 调用失败",
+                    "detail": "多 Agent 图执行失败，当前不会按规则伪造剪辑计划。",
+                    "data": {"error": f"{error_type}: {exc}"},
+                },
+            )
+            try:
+                reply, operations, trace = build_agent_failure_response(payload.content, timeline.timeline_json)
+                response = await _persist_agent_result(
+                    db,
+                    project_id,
+                    session,
+                    timeline.version,
+                    reply,
+                    operations,
+                    [],
+                    trace,
+                    [],
+                    [],
+                )
+            except Exception as fallback_exc:  # noqa: BLE001 - report terminal stream failure to the UI.
+                yield _sse("error", {"message": f"{type(fallback_exc).__name__}: {fallback_exc}"})
+                return
+
         if response.edit_plan:
-            yield f"event: plan\ndata: {json.dumps(response.edit_plan, default=str)}\n\n"
-        yield f"event: token\ndata: {json.dumps({'content': response.reply})}\n\n"
-        yield f"event: done\ndata: {json.dumps({'session_id': str(response.session_id), 'total_cost': response.total_cost})}\n\n"
+            yield _sse("plan", response.edit_plan)
+        for rendered_file in response.rendered_files:
+            yield _sse(
+                "preview_ready",
+                {
+                    "detail": "Agent 已生成预览/输出文件；如果还有时间线操作，仍需审批后才会应用。",
+                    "path": rendered_file,
+                },
+            )
+        yield _sse("token", {"content": response.reply})
+        yield _sse("done", {"session_id": str(response.session_id), "total_cost": response.total_cost})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@router.get("/agent/sessions/{session_id}", response_model=AgentSessionRead)
-async def get_session(session_id: UUID, db: AsyncSession = Depends(get_db)) -> AgentSession:
-    session = await db.get(AgentSession, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Agent session not found")
-    return session
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/agent/runs/{plan_id}/approve", response_model=ApprovalResponse)
 async def approve_plan(
     plan_id: UUID,
+    db: DbSession,
     payload: ApprovalRequest | None = None,
-    db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
     plan = await db.get(EditPlan, plan_id)
     if plan is None:
@@ -332,7 +386,7 @@ async def approve_plan(
             plan.project_id,
             selected,
             created_by="agent",
-            change_summary="Approved AI edit plan",
+            change_summary=f"Applied AI edit plan {plan.id}",
         )
         plan.status = EditPlanStatus.APPLIED
         plan.approved_by = "local"
@@ -355,7 +409,7 @@ async def approve_plan(
 
 
 @router.post("/agent/runs/{plan_id}/reject")
-async def reject_plan(plan_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
+async def reject_plan(plan_id: UUID, db: DbSession) -> dict:
     plan = await db.get(EditPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="Edit plan not found")
@@ -364,6 +418,62 @@ async def reject_plan(plan_id: UUID, db: AsyncSession = Depends(get_db)) -> dict
     return {"ok": True}
 
 
-@router.post("/agent/runs/{plan_id}/cancel")
-async def cancel_plan(plan_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:
-    return await reject_plan(plan_id, db)
+@router.post("/agent/runs/{plan_id}/undo")
+async def undo_applied_plan(plan_id: UUID, db: DbSession) -> dict:
+    plan = await db.get(EditPlan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Edit plan not found")
+    if plan.status != EditPlanStatus.APPLIED:
+        raise HTTPException(status_code=400, detail="Only applied edit plans can be undone")
+
+    latest = await get_latest_timeline(db, plan.project_id)
+    applied_result = await db.execute(
+        select(TimelineVersion)
+        .where(
+            TimelineVersion.project_id == plan.project_id,
+            TimelineVersion.change_summary == f"Applied AI edit plan {plan.id}",
+        )
+        .order_by(TimelineVersion.version.desc())
+        .limit(1)
+    )
+    applied = applied_result.scalar_one_or_none()
+    if applied is None:
+        raise HTTPException(status_code=404, detail="Applied timeline version not found")
+    if latest.id != applied.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot undo this plan because newer timeline versions exist. Restore a timeline version manually.",
+        )
+
+    base_result = await db.execute(
+        select(TimelineVersion)
+        .where(
+            TimelineVersion.project_id == plan.project_id,
+            TimelineVersion.version == plan.base_timeline_version,
+        )
+        .limit(1)
+    )
+    base = base_result.scalar_one_or_none()
+    if base is None:
+        raise HTTPException(status_code=404, detail="Base timeline version not found")
+
+    restored = TimelineVersion(
+        project_id=plan.project_id,
+        version=latest.version + 1,
+        parent_version_id=latest.id,
+        timeline_json=base.timeline_json,
+        change_summary=f"Undo AI edit plan {plan.id}",
+        created_by="agent_undo",
+    )
+    db.add(restored)
+    project = await db.get(Project, plan.project_id)
+    if project is not None:
+        project.current_timeline_version = restored.version
+        project.duration_ms = int(restored.timeline_json.get("duration_ms", 0))
+    await db.commit()
+    await manager.broadcast(
+        str(plan.project_id),
+        "timeline_updated",
+        {"version": restored.version, "timeline_version_id": restored.id},
+    )
+    return {"ok": True, "timeline_version": restored.version, "plan_status": plan.status.value}

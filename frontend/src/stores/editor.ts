@@ -13,6 +13,7 @@ type EditorState = {
   zoom: number
   isPlaying: boolean
   selectedClipIds: string[]
+  selectedAssetId: string | null
   draftOperations: object[]
   subtitleCues: SubtitleCue[]
   currentCueId: string | null
@@ -25,6 +26,9 @@ type EditorState = {
   setZoom: (value: number) => void
   togglePlay: () => void
   setPlaying: (value: boolean) => void
+  selectClip: (id: string, additive?: boolean) => void
+  clearClipSelection: () => void
+  selectAsset: (id: string | null) => void
   setSubtitleCues: (cues: SubtitleCue[]) => void
   setCurrentCue: (id: string | null) => void
   selectCue: (id: string, additive?: boolean) => void
@@ -42,6 +46,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   zoom: 1,
   isPlaying: false,
   selectedClipIds: [],
+  selectedAssetId: null,
   draftOperations: [],
   subtitleCues: [],
   currentCueId: null,
@@ -54,6 +59,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setZoom: (value) => set({ zoom: Math.min(4, Math.max(0.25, value)) }),
   togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
   setPlaying: (value) => set({ isPlaying: value }),
+  selectClip: (id, additive) =>
+    set((state) => ({
+      selectedClipIds: additive
+        ? state.selectedClipIds.includes(id)
+          ? state.selectedClipIds.filter((item) => item !== id)
+          : [...state.selectedClipIds, id]
+        : [id]
+    })),
+  clearClipSelection: () => set({ selectedClipIds: [] }),
+  selectAsset: (id) => set({ selectedAssetId: id }),
   setSubtitleCues: (cues) => set({ subtitleCues: cues }),
   setCurrentCue: (id) => set({ currentCueId: id }),
   selectCue: (id, additive) =>

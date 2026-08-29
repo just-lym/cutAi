@@ -10,7 +10,7 @@ AI multi-agent video editing platform MVP generated from the project prompt.
 - Asset upload into the configured data directory.
 - FFprobe metadata extraction for video/audio uploads.
 - SRT import into the script/timeline view.
-- Tool-based LangGraph agents with intent recognition and FFmpeg editing tools.
+- Agentic LangGraph runtime with a Main ReAct Agent, sub-agent delegation tools, and FFmpeg editing tools.
 - Partial approval/rejection and timeline version creation.
 - WebSocket refresh events for timeline and job updates.
 
@@ -39,6 +39,10 @@ data_root = "D:/MyProgramFiles/docker/app/cutAi/data/aicut"
 [cloud]
 dashscope_api_key = ""
 dashscope_workspace_id = ""
+agent_model = "qwen-plus"
+main_agent_model = "qwen-max"
+specialist_model = "qwen-plus"
+review_model = "qwen-max"
 video_gen_provider = "dashscope"
 runway_api_key = ""
 pika_api_key = ""

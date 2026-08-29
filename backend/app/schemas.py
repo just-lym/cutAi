@@ -65,27 +65,6 @@ class AgentMessage(BaseModel):
     content: str
 
 
-class AgentRunResponse(BaseModel):
-    session_id: UUID
-    reply: str
-    edit_plan: dict[str, Any] | None = None
-    awaiting_user: bool
-    total_cost: float = 0.0
-    trace: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class AgentSessionRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    project_id: UUID
-    user_id: str
-    langgraph_thread_id: str | None = None
-    status: str
-    total_tokens_used: int
-    total_cost_yuan: float
-
-
 class ApprovalRequest(BaseModel):
     approved_indices: list[int] | None = None
     rejected_indices: list[int] | None = None
@@ -104,6 +83,7 @@ class SubtitleUpdate(BaseModel):
     start_ms: int | None = None
     end_ms: int | None = None
     speaker: str | None = None
+    style: dict[str, Any] | None = None
 
 
 class BrollSearchRequest(BaseModel):
@@ -115,6 +95,21 @@ class BrollSelectRequest(BaseModel):
     asset_id: UUID
     position_ms: int
     duration_ms: int = 4000
+
+
+class RenderRequest(BaseModel):
+    width: int | None = None
+    height: int | None = None
+    frame_rate: float | None = None
+    output_path: str | None = None
+
+
+class RenderPathRequest(BaseModel):
+    default_name: str = "final.mp4"
+
+
+class RenderPathResponse(BaseModel):
+    path: str | None = None
 
 
 class JobRead(BaseModel):

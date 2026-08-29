@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
@@ -50,6 +51,10 @@ def usage_records(agent_name: str, messages: list[Any]) -> list[dict[str, Any]]:
     return records
 
 
+def message_usage_records(agent_name: str, messages: list[Any]) -> list[dict[str, Any]]:
+    return usage_records(agent_name, messages)
+
+
 def tool_trace(messages: list[Any]) -> list[dict[str, Any]]:
     trace = []
     for message in messages:
@@ -66,12 +71,43 @@ def tool_trace(messages: list[Any]) -> list[dict[str, Any]]:
                     "ok": bool(ok),
                     "data": {
                         "result_keys": list(payload.keys()),
+                        "artifact_type": payload.get("artifact_type"),
                         "count": payload.get("count"),
                         "error": payload.get("error"),
+                        "output_path": payload.get("output_path"),
+                        "output_paths": payload.get("output_paths"),
+                        "preview_path": payload.get("preview_path"),
+                        "artifact_path": payload.get("artifact_path"),
+                        "edl_path": payload.get("edl_path"),
+                        "contact_sheet_path": payload.get("contact_sheet_path"),
+                        "subtitle_path": payload.get("subtitle_path"),
                     },
                 }
             )
     return trace
+
+
+def rendered_files_from_tool_trace(tool_calls: list[dict[str, Any]]) -> list[str]:
+    files: list[str] = []
+    media_suffixes = {".mp4", ".mov", ".webm", ".m4v", ".mp3", ".wav", ".m4a", ".flac"}
+
+    def append_media_path(path: Any) -> None:
+        if path and Path(str(path)).suffix.lower() in media_suffixes:
+            files.append(str(path))
+
+    for call in tool_calls:
+        data = call.get("data") if isinstance(call, dict) else {}
+        if not isinstance(data, dict):
+            continue
+        append_media_path(data.get("output_path"))
+        append_media_path(data.get("preview_path"))
+        for path in data.get("output_paths") or []:
+            append_media_path(path)
+    return list(dict.fromkeys(files))
+
+
+def message_tool_trace(messages: list[Any]) -> list[dict[str, Any]]:
+    return tool_trace(messages)
 
 
 def final_ai_json(messages: list[Any]) -> dict[str, Any]:
@@ -103,7 +139,7 @@ async def run_agent(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     payload = {
         "user_request": user_request(state),
-        "recognized_intent": state.get("intent", {}),
+        "delegated_task": state.get("delegated_task"),
         "project_id": state.get("project_id"),
         "agent_outputs": state.get("agent_outputs", {}),
         "available_tools": toolbox.names_for(agent_name),

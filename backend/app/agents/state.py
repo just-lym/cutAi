@@ -19,4 +19,4 @@ class AgentState(TypedDict, total=False):
     next: str
     reply: str
     usage_records: list[dict[str, Any]]
-    intent: dict[str, Any]
+    delegated_task: str

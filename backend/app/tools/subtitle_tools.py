@@ -1,6 +1,5 @@
 import re
 
-
 TIMECODE_RE = re.compile(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})")
 
 

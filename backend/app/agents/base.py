@@ -90,7 +90,7 @@ def normalize_operations(items: Any) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
     operations: list[dict[str, Any]] = []
-    for item in items[:30]:
+    for item in items[:500]:
         if isinstance(item, dict) and item.get("type") in SUPPORTED_OPERATIONS:
             operations.append(item)
     return operations
@@ -119,6 +119,10 @@ def valid_operations(
     operations: list[dict[str, Any]],
     timeline: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    combined_errors = validate_edit_plan(operations, timeline)
+    if not combined_errors:
+        return operations, []
+
     kept: list[dict[str, Any]] = []
     conflicts: list[str] = []
     for operation in operations:
@@ -127,8 +131,8 @@ def valid_operations(
             conflicts.extend(errors)
         else:
             kept.append(operation)
-    combined_errors = validate_edit_plan(kept, timeline)
-    if combined_errors:
-        conflicts.extend(combined_errors)
+    kept_errors = validate_edit_plan(kept, timeline)
+    if kept_errors:
+        conflicts.extend(kept_errors)
         return [], conflicts
-    return kept, conflicts
+    return kept, [*combined_errors, *conflicts]

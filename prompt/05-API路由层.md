@@ -37,11 +37,9 @@ POST /api/projects/{id}/timeline/restore     恢复到某版本 (创建新版本
 ## agents.py - Agent 会话与审批
 ...
 
-POST   /api/projects/{id}/agent/messages     发送消息给 AI Agent
-GET    /api/agent/sessions/{session_id}      获取会话列表
 POST   /api/agent/runs/{run_id}/approve      批准继续计划 (支持部分审批)
 POST   /api/agent/runs/{run_id}/reject       拒绝继续计划
-POST   /api/agent/runs/{run_id}/cancel       取消
+POST   /api/agent/runs/{run_id}/undo         撤回最后一次已应用的 Agent 计划
 
 ## 流式 SSE 端点
 ```
@@ -50,14 +48,18 @@ POST /api/projects/{id}/agent/stream     SSE 流式 Agent 响应
 事件类型：
 | event | data | 说明 |
 |-------|------|------|
-| thinking | `{"agent": "supervisor"}` | Agent 思考中 |
+| thinking | `{"agent": "main_agent"}` | Agent 思考中 |
+| status | `{"agent": "main_agent", "detail": "..."}` | 长任务心跳 |
+| progress | `{"stage": "...", "progress": 0.5}` | 模型/工具/保存阶段进度 |
+| tool_call | `{"tool": "...", "detail": "..."}` | Agent 工具调用轨迹 |
+| preview_ready | `{"path": "..."}` | FFmpeg 预览/输出文件就绪 |
 | token | `{"content": "..."}` | 回复 token (逐字) |
-| agent_done | `{"agent": "audio_agent"}` | Specialist 完成 |
+| trace | `{"title": "...", "detail": "...", "data": {...}}` | Agent 执行轨迹 |
 | plan | `{"summary, operations, conflicts"}` | 最终编辑计划 |
 | done | `{"session_id, total_cost"}` | 流结束 |
 | error | `{"message": "..."}` | 错误 |
 
-使用 `graph.astream()` 逐 chunk 输出，仅在 respond/review 阶段产生 token 事件。
+使用 `graph.astream()` 输出 Main Agent、专家 Agent、Review 轨迹；长任务通过 status/progress/tool_call 保持前端有反馈。
 前端通过 fetch + ReadableStream 消费，支持 AbortController 中断。
 
 ### 部分审批 (approve endpoint)
@@ -72,15 +74,15 @@ POST /api/projects/{id}/agent/stream     SSE 流式 Agent 响应
 - body 为空或 approved_indices 为 null - 全量批准 (原有行为)
 - 提供 indices - 部分审批，status 设为 PARTIALLY_APPROVED
 - 返回 {ok, applied_count, rejected_count, plan_status}
-### 核心流程 (send_agent_message):
+### 核心流程 (stream_agent_message):
 1. 查找或创建 ACTIVE 状态的 AgentSession
-2. 构建 LangGraph Supervisor Graph
+2. 构建 LangGraph Agentic runtime，Main Creative Agent 使用 `create_agent` ReAct 模式
 3. 初始化 AgentState (messages=[HumanMessage], project_id, ...)
-4. `graph.invoke(initial_state)` - 可能经历多次 Agent hop
-5. 提取最终 plan (最后一个 AIMessage.content)
+4. `graph.astream(initial_state)` - 流式输出 Main Agent、工具调用、专家 Agent 和 Review 轨迹
+5. 提取最终 plan
 6. 更新 session 费用
 7. 如果有 edit_plan + awaiting_user=True - 创建 EditPlan 记录 (WAITING_USER)
-8. 返回 AgentRunResponse (session_id, reply, edit_plan, awaiting_user, total_cost)
+8. 返回 plan/token/done SSE 事件
 ### Approve 执行链路:
 1. 收集 approved_indices 对应的 operations
 2. 调用 `execute_edit_plan(project_id, operations)` - 生成新 TimelineVersion
@@ -88,6 +90,13 @@ POST /api/projects/{id}/agent/stream     SSE 流式 Agent 响应
 4. WebSocket broadcast `timeline_updated` 消息
 5. 返回 `{ok, applied_count, rejected_count, plan_status, timeline_version}`
 6. 失败 -> ExecutionError -> 返回 500, plan 状态不变
+
+### Undo 执行链路:
+1. 仅允许撤回 status=APPLIED 的计划
+2. 查找 `change_summary == Applied AI edit plan {plan_id}` 的时间线版本
+3. 只有该版本仍是最新版本时自动撤回
+4. 基于 `base_timeline_version` 创建新的恢复版本
+5. WebSocket broadcast `timeline_updated`
 ## WebSocket 端点
 ```
 WS /ws/projects/{project_id}  实时事件推送
@@ -111,11 +120,8 @@ DELETE /api/projects/{id}/subtitles/{cue_id} 删除字幕
 ## broll.py - B-roll 管理
 ```
 POST   /api/projects/{id}/broll/analyze       分析 B-roll 插入位置 (调用 broll_agent)
-POST   /api/projects/{id}/broll/generate      生成 B-roll (受外部 API 限制)
 POST   /api/projects/{id}/broll/search-library 素材库语义搜索 (Chroma embedding_store)
-POST   /api/projects/{id}/broll/search-web    网络素材搜索 (TODO: Pexels/Pixabay)
 POST   /api/projects/{id}/broll/select        选择并插入 B-roll -> 返回 operation
-POST   /api/projects/{id}/broll/preview       渲染 B-roll 预览 (TODO: GPU)
 
 ```
 
