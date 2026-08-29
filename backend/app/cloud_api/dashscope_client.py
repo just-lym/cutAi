@@ -81,10 +81,17 @@ def llm_chat_sync(
         message = _get(response, "message", "DashScope request failed")
         raise DashScopeError(str(message))
 
+    tool_calls = _message_tool_calls(response)
+    try:
+        content = _message_content(response)
+    except DashScopeError:
+        if not tool_calls:
+            raise
+        content = ""
     usage = _usage(response)
     return {
-        "content": _message_content(response),
-        "tool_calls": _message_tool_calls(response),
+        "content": content,
+        "tool_calls": tool_calls,
         "usage": usage,
         "request_id": _get(response, "request_id"),
         "model": model,
@@ -129,9 +136,16 @@ async def llm_chat_stream(
 
     responses = await asyncio.to_thread(call_stream)
     for response in responses:
+        tool_calls = _message_tool_calls(response)
+        try:
+            content = _message_content(response)
+        except DashScopeError:
+            if not tool_calls:
+                raise
+            content = ""
         yield {
-            "content": _message_content(response),
-            "tool_calls": _message_tool_calls(response),
+            "content": content,
+            "tool_calls": tool_calls,
             "usage": _usage(response),
             "request_id": _get(response, "request_id"),
             "model": model,

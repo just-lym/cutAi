@@ -1,212 +1,158 @@
-# 模块 3: 多 Agent 系统 (LangGraph)
+# 模块 3: create_agent 多 Agent 系统
 
-## 架构概述
+## 架构目标
 
-采用 **Supervisor + Specialists** 模式：
-- **supervisor Agent** (qwen-max)：理解用户意图，动态分派任务给 Specialist，循环调度直到完成
-- **subtitle Agent** (qwen-plus)：字幕分析、ASR、断句、纠错
-- **audio Agent** (qwen-plus)：音效检测、音量分析
-- **b-roll Agent** (qwen-max)：B-roll 位置识别、视频生成提示词
-- **review Agent** (qwen-max)：合并所有建议、冲突检测、生成最终 EditPlan
+用户用自然语言和 Agent 对话，下达剪辑目标；Agent 自主选择工具读取信息、分析素材、调用 FFmpeg，并输出结构化结果。
+
+当前实现采用：
+
+- LangGraph 编排多 Agent 节点
+- LangChain `create_agent` 创建 Specialist Agent
+- LangChain `@tool` 标记可调用工具
+- Supervisor 根据意图识别做路由
+- Specialist Agent 通过工具自主获取项目上下文和执行剪辑动作
+- Review Agent 校验并合并最终 EditPlan
 
 图结构：
-```
-supervisor -> (条件路由) -> subtitle_agent / audio_agent / broll_agent -> supervisor (循环)
+
+```text
+intent -> supervisor -> subtitle_agent / audio_agent / broll_agent / video_agent -> supervisor
 supervisor -> review -> END
-supervisor -> respond -> END (直接回复)
+supervisor -> respond -> END
 ```
 
-## AgentState (共享状态)
+## 文件结构
+
+```text
+backend/app/agents/
+  graph.py             # LangGraph 节点连接
+  runtime.py           # create_agent 运行时、工具包装、结果解析
+  intent.py            # 用户意图识别：基础操作 -> specialist
+  supervisor.py        # 路由调度
+  subtitle_agent.py    # create_subtitle_agent()
+  audio_agent.py       # create_audio_agent()
+  broll_agent.py       # create_broll_agent()
+  video_agent.py       # create_video_agent()
+  review_agent.py      # create_review_agent()
+  respond_agent.py     # 无明确可执行操作时回复
+  tools/
+    __init__.py        # AgentToolbox
+    schema.py          # AgentTool
+    context.py         # 项目上下文和路径辅助
+    timeline.py        # 时间线工具
+    assets.py          # 素材工具
+    subtitles.py       # 字幕工具
+    ffmpeg.py          # FFmpeg 工具
+backend/app/cloud_api/
+  langchain_chat_model.py  # DashScope -> LangChain BaseChatModel 适配器
+```
+
+## create_agent 入口
+
+每个 Specialist 文件都暴露 `create_xxx_agent()`，内部调用统一运行时：
 
 ```python
-from langgraph.graph.message import add_messages
-
-class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]  # LangGraph 消息累积
-    project_id: str
-    project_dir: str
-    timeline_version: int | None
-    edit_plans: dict | None      # Review Agent 输出的最终计划
-    agent_outputs: dict[str, Any] # 各 Specialist 的结构化输出
-    awaiting_user: bool           # 是否需要用户确认
-    total_costs: float            # 累计费用（元）
+def create_video_agent(tools: Any) -> Any:
+    return create_tool_agent(
+        "video_agent",
+        VIDEO_AGENT_PROMPT,
+        tools,
+        settings.cloud.specialist_model or settings.cloud.agent_model,
+    )
 ```
 
-ChatDashScope 适配层
-自定义 LangChain BaseChatModel，包装阿里 DashScope API，支持 tool calling。
-
-关键点：
-
-1. 继承 BaseChatModel，实现 _generate() 方法
-
-2. 消息格式转换：LangChain Message -> DashScope format (system/user/assistant/tool)
-
-3. Tool call 特别：DashScope 返回的 tool_calls 转为 LangChain AIMessage.tool_calls 格式
-
-4. bind_tools() 方法：将 LangChain BaseTool 转为 Dash 的 function format
+`runtime.py` 中实际调用 LangChain API：
 
 ```python
-class ChatDashScope(BaseChatModel):
-    model_name: str = Field(default="qwen-max", alias="model")
-    temperature: float = 0.7
-    max_tokens: Optional[int] = None
+from langchain.agents import create_agent
 
-    def _generate(self, messages, stop, run_manager, **kwargs) -> ChatResult:
-        ds_messages = _messages_to_dashscope(messages)
-        call_kwargs = {
-            "model": self.model_name,
-            "messages": ds_messages,
-            "result_format": "message",
-            "temperature": self.temperature,
-        }
-        if kwargs.get("tools"):
-            call_kwargs["tools"] = _convert_tools_to_dashscope(kwargs["tools"])
-
-        response = Generation.call(**call_kwargs)
-        # 解析 response -> AIMessage(content, tool_calls)
-        # 返回 ChatResult(generations=[ChatGeneration(message=ai_message)])
+return create_agent(
+    model=ChatDashScope(model=model, temperature=0.2),
+    tools=create_langchain_tools(toolbox, agent_name),
+    system_prompt=system_prompt,
+    name=agent_name,
+)
 ```
-Supervisor Orchestrator
-ReAct 风格编排，每轮只输出一个 JSON 决策：
 
-System Prompt 核心：
+## 意图识别
+
+`intent.py` 将用户输入识别成基础操作：
+
+- `UPDATE_SUBTITLE` / `CREATE_SUBTITLE` -> `subtitle_agent`
+- `DELETE_RANGE` / `SET_VOLUME` / `FADE_IN` / `FADE_OUT` -> `audio_agent`
+- `INSERT_BROLL_OVERLAY` / `GENERATE_BROLL` -> `broll_agent`
+- `CUT_SEGMENT` / `EXPORT_VIDEO` -> `video_agent`
+
+Supervisor 根据 `AgentState.intent.specialist_agents` 决定下一步调度哪个 Agent。真正的信息获取和工具选择由 Specialist Agent 自己完成。
+
+## 工具分组
+
+工具必须使用 LangChain 原生 `@tool` 标记，不使用自定义伪工具对象，也不通过 `StructuredTool.from_function` 临时包一层。
+
+### timeline
+
+- `get_project_timeline`
+- `validate_edit_operations`
+
+### assets
+
+- `get_project_assets`
+- `search_project_assets`
+
+### subtitles
+
+- `get_project_subtitles`
+
+### ffmpeg
+
+- `ffmpeg_probe_asset`
+- `ffmpeg_detect_silence`
+- `ffmpeg_cut_segment`
+- `ffmpeg_remove_ranges`
+
+FFmpeg 工具会真实调用本地 `ffmpeg/ffprobe`，并把输出文件写入：
+
+```text
+{project_dir}/agent_outputs/
 ```
-你是视频剪辑 AI 平台的 Supervisor Agent。
 
-可调度的专业 Agent：
+## Agent 职责
 
-- subtitle_agent：字幕分析、纠错、断句、翻译、ASR 生成
+### Subtitle Agent
 
-- audio_agent：音频分析、音效检测与删除、音量调整
+通过 `create_agent` 自主调用字幕、时间线、素材和媒体探测工具，输出 `UPDATE_SUBTITLE` 操作。
 
-- broll_agent：B-roll 素材推荐、插入位置识别、视频生成提示词
+### Audio Agent
 
-输出格式（严格 JSON）：
-{"next": "subtitle_agent", "reason": "用户要求修正字幕"}
-{"next": "review", "reason": "所有编辑建议已收集"}
-{"next": "respond", "reason": "用户在询问功能，无需调度"}
+通过 `ffmpeg_detect_silence` 检测静音。`DELETE_RANGE` 必须来自真实工具结果。用户要求直接剪出文件时，可继续调用 `ffmpeg_remove_ranges`。
 
-```
-路由函数解析 JSON 中的 `next` 字段，映射到对应节点。
-```python
-def build_supervisor_graph() -> StateGraph:
-    graph = StateGraph(AgentState)
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("subtitle_agent", run_subtitle_node)
-    graph.add_node("audio_agent", run_audio_node)
-    graph.add_node("broll_agent", run_broll_node)
-    graph.add_node("review", run_review_node)
-    graph.add_node("respond", respond_node)
+### B-roll Agent
 
-    graph.set_entry_point("supervisor")
-    graph.add_conditional_edges("supervisor", route_next, {...})
-    # Specialist 循环回 supervisor
-    graph.add_edge("subtitle_agent", "supervisor")
-    graph.add_edge("audio_agent", "supervisor")
-    graph.add_edge("broll_agent", "supervisor")
+读取时间线、字幕和素材，选择已有素材生成 `INSERT_BROLL_OVERLAY`，或返回无法插入的原因。
 
-    # 终止节点
-    graph.add_edge("review", END)
-    graph.add_edge("respond", END)
+### Video Agent
 
-    return graph.compile()
-```
-## Specialist Agents
-每个 Specialist 使用 `langgraph.prebuilt.create_react_agent` 创建，配备专属工具集和 System Prompt。
+处理“截取 10 秒到 20 秒”“剪出前 5 秒”“导出片段”等请求，调用 `ffmpeg_cut_segment` 或 `ffmpeg_remove_ranges` 输出文件。
 
-## Subtitle Agent (qwen-plus)
-- 工具：get_project_subtitles, get_project_assets, submit_asr, check_asr_status, parse_srt, probe_media
-- 输出格式：
-```json
-{
-  "summary": "修正了3处错别字，优化了5处断句",
-  "operations": [
-    {"type": "UPDATE_SUBTITLE", "cue_id": "...", "text": "...", "start_ms": ..., "end_ms": ...},
-    {"type": "SPLIT_SUBTITLE", "cue_id": "...", "split_at_ms": ...},
-    {"type": "MERGE_SUBTITLES", "cue_ids": ["...", "..."]}
-  ]
-}
-```
-### Audio Agent (qwen-plus)
-- 工具：get_project_assets, get_project_timeline, detect_silence, extract_audio, probe_media
-- 关键规则：DELETE_RANGE 必须基于 detect_silence 实际结果；区分“自然静音”(<1s) 和“无效静音”(>1s)
-- 输出格式：
-```json
-{
-  "summary": "检测到2段无效静音，建议整体音量+2db",
-  "operations": [
-    {"type": "DELETE_RANGE", "start_ms": 42000, "end_ms": 44000, "reason": "..."},
-    {"type": "SET_VOLUME", "start_ms": 0, "end_ms": -1, "volume": 1.25},
-    {"type": "FADE_IN", "start_ms": 0, "duration_ms": 500},
-    {"type": "FADE_OUT", "start_ms": 170000, "duration_ms": 1000}
-  ]
-}
-```
-B-roll Agent (qwen-max)
-- 工具：get_project_timeline, get_project_subtitles, get_project_assets, search_assets_by_embedding, generate_thumbnail, probe_media
-- 任务：内容转折点、抽象概念处、避免重复覆盖、每段 3-6 秒
-```json
-{
-  "summary": "建议在3个位置插入B-roll",
-  "insertions": [
-    {
-      "position_ms": 32000,
-      "duration_ms": 4000,
-      "context": "讲到团队协作场景时",
-      "visual_description": "现代化的开放式办公室...",
-      "prompt_en": "Modern open-plan office, team brainstorming..., cinematic, 4K",
-      "style_hints": "cinematic, warm",
-      "audio_policy": "KEEP_ORIGINAL"
-    }
-  ]
-}
-```
-## Review Agent (qwen-max)
-- 工具：get_project_timeline, validate_edit_plan, apply_edit_plan
-- 职责：合并所有 Agent 输出 → 时间顺序 → 冲突检测 → validate_edit_plan 校验 → 输出最终计划
-冲突规则：
+### Review Agent
 
- - DELETE_RANGE 不能覆盖 INSERT_BROLL 位置
- - DELETE_RANGE 之间不能重叠
- - SET_VOLUME 区间必须在有效音轨范围内
- - 字幕修改不能指向已删除区间
-- 输出格式：
+读取 Specialist 输出，调用 `validate_edit_operations` 校验候选操作，生成最终计划：
+
 ```json
 {
   "plan": {
-    "summary": "删除2段静音，修改3条字幕，插入1段B-roll",
-    "operations": [...],
+    "summary": "删除2段静音，插入1段B-roll",
+    "operations": [],
     "conflicts": [],
     "requires_user_approval": true
   }
 }
 ```
-## Agent Tools (@tool 包装层)
-将 app/tools/ 下的确定性工具包装为 LangChain @tool，供 ReAct 循环调用。
 
-关键设计：
+## 设计原则
 
-1. 同步执行（LangChain 默认） → 用 run_async() helper 在异步上下文中执行
-2. 每个 tool 有详细中文 docstring，LLM 据此决定使用时机
-3. 按agent分组为：SUBTITLE_TOOLS / AUDIO_TOOLS / BROLL_TOOLS / REVIEW_TOOLS
-
-工具清单：
-- **media**: probe_media, detect_silence, extract_audio, generate_thumbnails
-- **subtitles**: submit_asr, check_asr_status, parse_srt
-- **timeline**: validate_edit_plan, apply_edit_plan
-- **data access**: get_project_subtitles, get_project_assets, get_project_timeline, search_assets_by_embedding
-
-`_run_async` helper 处理 "sync context 中运行 async" 的问题：
-```python
-def _run_async(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(asyncio.run, coro).result()
-    else:
-        return asyncio.run(coro)
-```
+1. 用户通过自然语言给 Agent 下达目标。
+2. Specialist Agent 用 `create_agent` 创建，并在工具循环中自主选择工具。
+3. 项目上下文不预先塞进 prompt；Agent 需要什么就调用工具取什么。
+4. 工具按功能分文件，FFmpeg 剪辑能力集中在 `agents/tools/ffmpeg.py` 和底层 `app/tools/media_tools.py`。
+5. Review Agent 负责校验和合并，最终写入等待审批的 EditPlan。

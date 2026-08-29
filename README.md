@@ -10,7 +10,7 @@ AI multi-agent video editing platform MVP generated from the project prompt.
 - Asset upload into the configured data directory.
 - FFprobe metadata extraction for video/audio uploads.
 - SRT import into the script/timeline view.
-- Deterministic MVP Agent that creates approval-ready edit plans.
+- Tool-based LangGraph agents with intent recognition and FFmpeg editing tools.
 - Partial approval/rejection and timeline version creation.
 - WebSocket refresh events for timeline and job updates.
 
