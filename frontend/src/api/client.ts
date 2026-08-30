@@ -158,6 +158,7 @@ export type AgentStreamDone = {
   video_type: VideoType
   coordinator: string
   team: string[]
+  awaiting_user: boolean
 }
 
 export type AgentStreamHandlers = {
@@ -266,7 +267,8 @@ export const api = {
       request<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
     get: (id: string) => request<Project>(`/projects/${id}`),
     update: (id: string, data: { video_type: VideoType }) =>
-      request<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
+      request<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    remove: (id: string) => request<{ ok: boolean }>(`/projects/${id}`, { method: 'DELETE' })
   },
   assets: {
     list: (projectId: string) => request<Asset[]>(`/projects/${projectId}/assets`),

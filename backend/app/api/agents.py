@@ -148,11 +148,12 @@ async def _persist_agent_result(
     usage_records: list[dict[str, Any]],
     rendered_files: list[str] | None = None,
     created_by_agent: str = "creative-director",
+    awaiting_user: bool = False,
 ) -> AgentRunResult:
     await _record_agent_usage(db, project_id, session, usage_records)
 
     edit_plan = None
-    awaiting_user = False
+    should_await_user = awaiting_user
     if operations:
         plan = EditPlan(
             project_id=project_id,
@@ -173,14 +174,14 @@ async def _persist_agent_result(
             "requires_user_approval": True,
             "rendered_files": rendered_files or [],
         }
-        awaiting_user = True
+        should_await_user = True
 
     await db.commit()
     return AgentRunResult(
         session_id=session.id,
         reply=reply,
         edit_plan=edit_plan,
-        awaiting_user=awaiting_user,
+        awaiting_user=should_await_user,
         total_cost=session.total_cost_yuan,
         trace=trace,
         rendered_files=rendered_files or [],
@@ -189,7 +190,15 @@ async def _persist_agent_result(
 
 def _agent_result_from_state(
     final_state: dict[str, Any],
-) -> tuple[str, list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+) -> tuple[
+    str,
+    list[dict[str, Any]],
+    list[str],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+    bool,
+]:
     edit_plan_payload = final_state.get("edit_plans")
     reply = final_state.get("reply") or (
         edit_plan_payload.get("summary") if edit_plan_payload else "Agent 已完成处理。"
@@ -199,7 +208,8 @@ def _agent_result_from_state(
     trace = list(final_state.get("trace") or [])
     usage_records = list(final_state.get("usage_records") or [])
     rendered_files = list(edit_plan_payload.get("rendered_files") or []) if edit_plan_payload else []
-    return str(reply), operations, conflicts, trace, usage_records, rendered_files
+    awaiting_user = bool(final_state.get("awaiting_user"))
+    return str(reply), operations, conflicts, trace, usage_records, rendered_files, awaiting_user
 
 
 @router.post("/projects/{project_id}/agent/stream")
@@ -314,8 +324,18 @@ async def stream_agent_message(
             if final_state is None:
                 raise RuntimeError("Agent stream finished without final state")
 
-            yield _sse("progress", {"stage": "review", "detail": "Agent 已完成思考，正在保存可审批结果。", "progress": 0.9})
-            reply, operations, conflicts, trace, usage_records, rendered_files = _agent_result_from_state(final_state)
+            reply, operations, conflicts, trace, usage_records, rendered_files, awaiting_user = (
+                _agent_result_from_state(final_state)
+            )
+            progress_detail = (
+                "Agent 需要你补充信息，本轮没有开始剪辑。"
+                if awaiting_user
+                else "Agent 已完成思考，正在保存可审批结果。"
+            )
+            yield _sse(
+                "progress",
+                {"stage": "clarification" if awaiting_user else "review", "detail": progress_detail, "progress": 0.9},
+            )
             response = await _persist_agent_result(
                 db,
                 project_id,
@@ -328,6 +348,7 @@ async def stream_agent_message(
                 usage_records,
                 rendered_files,
                 str(final_state.get("coordinator_name") or mode.coordinator_name),
+                awaiting_user,
             )
         except Exception as exc:  # noqa: BLE001 - stream should degrade into a usable local plan.
             await db.rollback()
@@ -382,6 +403,7 @@ async def stream_agent_message(
                 "video_type": mode.video_type,
                 "coordinator": mode.coordinator_name,
                 "team": list(mode.team),
+                "awaiting_user": response.awaiting_user,
             },
         )
 

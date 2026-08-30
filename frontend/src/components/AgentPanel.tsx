@@ -1,6 +1,6 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, Check, CircleDot, Loader2, RotateCcw, Send, X } from 'lucide-react'
+import { Bot, Check, ChevronDown, CircleDot, CircleHelp, Loader2, RotateCcw, Send, Sparkles, X } from 'lucide-react'
 import { api, type AgentTraceStep, type EditPlan } from '../api/client'
 import { getVideoMode, VIDEO_MODE_OPTIONS, type VideoType } from '../constants/videoModes'
 import { useEditorStore } from '../stores/editor'
@@ -41,6 +41,8 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
   const [statusMessage, setStatusMessage] = useState('')
   const [lastAppliedPlanId, setLastAppliedPlanId] = useState<string | null>(null)
   const [lastRenderedFiles, setLastRenderedFiles] = useState<string[]>([])
+  const [awaitingClarification, setAwaitingClarification] = useState(false)
+  const processRef = useRef<HTMLDetailsElement>(null)
   const queryClient = useQueryClient()
   const setBottomTab = useEditorStore((state) => state.setBottomTab)
   const currentMode = getVideoMode(videoType)
@@ -54,6 +56,7 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
       setPlan(null)
       setDecisions({})
       setLastRenderedFiles([])
+      setAwaitingClarification(false)
       setNotice(`已切换到${nextMode.label}多 Agent 模式。`)
       await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
       await queryClient.invalidateQueries({ queryKey: ['projects'] })
@@ -124,6 +127,7 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
     setSendError('')
     setStatusMessage('')
     setLastRenderedFiles([])
+    setAwaitingClarification(false)
     if (!projectId) {
       setTrace([
         {
@@ -133,6 +137,8 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
       ])
       return
     }
+    setInput('')
+    if (processRef.current) processRef.current.open = false
     setIsSending(true)
     setStatusMessage('Agent 正在启动')
     setReply('')
@@ -206,10 +212,13 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
         onToken: (content) => {
           setReply((current) => current + content)
         },
-        onDone: () => {
+        onDone: (event) => {
+          setAwaitingClarification(event.awaiting_user)
           if (!receivedPlan) {
             setNotice(
-              receivedPreview
+              event.awaiting_user
+                ? 'Agent 尚未开始剪辑，正在等待你补充需求。'
+                : receivedPreview
                 ? 'Agent 已生成可检查的预览文件；这次没有生成需要应用到时间线的操作。'
                 : 'Agent 已完成，但没有生成可应用计划。'
             )
@@ -278,7 +287,18 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
             <span>{statusMessage || 'Agent 正在工作，任务仍在进行中。'}</span>
           </div>
         ) : null}
-        <p className="muted">{reply || '输入剪辑目标，Agent 会生成可审批的结构化编辑计划。'}</p>
+        {reply ? (
+          <section
+            className={awaitingClarification ? 'agent-result clarification' : 'agent-result'}
+            aria-label={awaitingClarification ? '需要你确认' : '本轮结论'}
+          >
+            <div className="agent-result-header">
+              {awaitingClarification ? <CircleHelp size={15} /> : <Sparkles size={15} />}
+              <span>{awaitingClarification ? '需要你确认' : '本轮结论'}</span>
+            </div>
+            <p>{reply}</p>
+          </section>
+        ) : null}
         {notice ? <p className="success-text">{notice}</p> : null}
         {lastRenderedFiles.length ? (
           <div className="rendered-files compact-files">
@@ -295,28 +315,35 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
         ) : null}
         {sendError ? <p className="error-text">{sendError}</p> : null}
       </div>
-      <div className="agent-trace">
-        <div className="section-label">执行过程</div>
-        {trace.length ? (
-          trace.map((step, index) => (
-            <article className="trace-step" key={`${step.title}-${index}`}>
-              <CircleDot size={13} />
-              <div>
-                <b>{step.title}</b>
-                <p>{step.detail}</p>
-                {step.data && Object.keys(step.data).length ? (
-                  <details className="trace-data">
-                    <summary>数据</summary>
-                    <code>{JSON.stringify(step.data)}</code>
-                  </details>
-                ) : null}
-              </div>
-            </article>
-          ))
-        ) : (
-          <p className="muted compact">等待发送指令。</p>
-        )}
-      </div>
+      {trace.length ? (
+        <details className="agent-process" ref={processRef}>
+          <summary>
+            <span className="process-summary-main">
+              {isSending ? <Loader2 className="spin" size={14} /> : <CircleDot size={14} />}
+              <b>执行过程</b>
+            </span>
+            <span>{isSending ? '进行中' : `${trace.length} 项`}</span>
+            <ChevronDown className="process-chevron" size={15} />
+          </summary>
+          <div className="agent-trace">
+            {trace.map((step, index) => (
+              <article className="trace-step" key={`${step.title}-${index}`}>
+                <CircleDot size={13} />
+                <div>
+                  <b>{step.title}</b>
+                  <p>{step.detail}</p>
+                  {step.data && Object.keys(step.data).length ? (
+                    <details className="trace-data">
+                      <summary>数据</summary>
+                      <code>{JSON.stringify(step.data)}</code>
+                    </details>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        </details>
+      ) : null}
       {plan ? (
         <div className="agent-plan">
           <div className="plan-toolbar">
@@ -369,16 +396,18 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
           </div>
         </div>
       ) : null}
-      <form className="agent-input" onSubmit={onSubmit}>
-        <textarea
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="用自然语言告诉 Agent 想怎么剪"
-        />
-        <button type="button" onClick={submitAgentMessage} disabled={isSending || !input.trim()}>
-          <Send size={17} />
-        </button>
-      </form>
+      {!isSending ? (
+        <form className="agent-input" onSubmit={onSubmit}>
+          <textarea
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="用自然语言告诉 Agent 想怎么剪"
+          />
+          <button type="button" onClick={submitAgentMessage} disabled={!input.trim()}>
+            <Send size={17} />
+          </button>
+        </form>
+      ) : null}
     </aside>
   )
 }
