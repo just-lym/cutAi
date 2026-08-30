@@ -7,6 +7,9 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     project_id: str
     project_dir: str
+    video_type: str
+    mode_label: str
+    coordinator_name: str
     timeline_version: int | None
     timeline: dict[str, Any]
     assets: list[dict[str, Any]]

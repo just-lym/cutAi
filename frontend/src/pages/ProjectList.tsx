@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { Clapperboard, FolderPlus, PlayCircle } from 'lucide-react'
 import { api } from '../api/client'
+import { getVideoMode, VIDEO_MODE_OPTIONS, type VideoType } from '../constants/videoModes'
 
 export function ProjectList() {
-  const [name, setName] = useState('我的剪辑项目')
+  const [name, setName] = useState('')
+  const [videoType, setVideoType] = useState<VideoType>('TALKING_HEAD')
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects.list })
@@ -19,7 +21,7 @@ export function ProjectList() {
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault()
-    createProject.mutate({ name })
+    createProject.mutate({ name: name.trim() || '未命名项目', video_type: videoType })
   }
 
   return (
@@ -37,11 +39,24 @@ export function ProjectList() {
 
       <section className="project-create">
         <form onSubmit={onSubmit}>
-          <input value={name} onChange={(event) => setName(event.target.value)} />
-          <button type="submit" disabled={createProject.isPending || !name.trim()}>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="项目名称" />
+          <button type="submit" disabled={createProject.isPending}>
             <FolderPlus size={18} />
             新建项目
           </button>
+          <div className="video-mode-switch" aria-label="视频类型">
+            {VIDEO_MODE_OPTIONS.map(({ value, label, Icon }) => (
+              <button
+                type="button"
+                className={videoType === value ? 'video-mode-option active' : 'video-mode-option'}
+                key={value}
+                onClick={() => setVideoType(value)}
+              >
+                <Icon size={15} />
+                {label}
+              </button>
+            ))}
+          </div>
         </form>
         {projects.error ? <p className="error-text">后端暂未响应，可以先进入演示页。</p> : null}
       </section>
@@ -55,7 +70,7 @@ export function ProjectList() {
             <div>
               <strong>{project.name}</strong>
               <span>
-                v{project.current_timeline_version} · {Math.round(project.duration_ms / 1000)}s · {project.status}
+                {getVideoMode(project.video_type).label} · v{project.current_timeline_version} · {Math.round(project.duration_ms / 1000)}s · {project.status}
               </span>
             </div>
           </Link>

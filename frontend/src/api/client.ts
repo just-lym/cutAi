@@ -1,7 +1,10 @@
+import type { VideoType } from '../constants/videoModes'
+
 export type Project = {
   id: string
   owner_id: string
   name: string
+  video_type: VideoType
   width: number
   height: number
   frame_rate: number
@@ -152,6 +155,9 @@ export type RenderPathResponse = {
 export type AgentStreamDone = {
   session_id: string
   total_cost: number
+  video_type: VideoType
+  coordinator: string
+  team: string[]
 }
 
 export type AgentStreamHandlers = {
@@ -256,9 +262,11 @@ async function streamAgentMessage(projectId: string, content: string, handlers: 
 export const api = {
   projects: {
     list: () => request<Project[]>('/projects'),
-    create: (data: { name: string; width?: number; height?: number; frame_rate?: number }) =>
+    create: (data: { name: string; video_type: VideoType; width?: number; height?: number; frame_rate?: number }) =>
       request<Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
-    get: (id: string) => request<Project>(`/projects/${id}`)
+    get: (id: string) => request<Project>(`/projects/${id}`),
+    update: (id: string, data: { video_type: VideoType }) =>
+      request<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
   },
   assets: {
     list: (projectId: string) => request<Asset[]>(`/projects/${projectId}/assets`),

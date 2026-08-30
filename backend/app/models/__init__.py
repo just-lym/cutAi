@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +17,12 @@ class ProjectStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     ARCHIVED = "ARCHIVED"
+
+
+class VideoType(str, enum.Enum):
+    VLOG = "VLOG"
+    TALKING_HEAD = "TALKING_HEAD"
+    INTERVIEW = "INTERVIEW"
 
 
 class AssetType(str, enum.Enum):
@@ -85,6 +91,9 @@ class Project(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[str] = mapped_column(String(64), default="local", index=True)
     name: Mapped[str] = mapped_column(String(255))
+    video_type: Mapped[str] = mapped_column(
+        String(32), default=VideoType.TALKING_HEAD.value, server_default=VideoType.TALKING_HEAD.value
+    )
     width: Mapped[int] = mapped_column(Integer, default=1920)
     height: Mapped[int] = mapped_column(Integer, default=1080)
     frame_rate: Mapped[float] = mapped_column(Float, default=30.0)

@@ -1,8 +1,6 @@
 from typing import Any
 
-from app.agents.base import toolbox, trace
-from app.agents.runtime import create_tool_agent, rendered_files_from_tool_trace, run_agent
-from app.agents.state import AgentState
+from app.agents.runtime import create_tool_agent
 from app.config import settings
 
 VIDEO_AGENT_PROMPT = """
@@ -33,45 +31,3 @@ def create_video_agent(tools: Any) -> Any:
         tools,
         settings.cloud.specialist_model or settings.cloud.agent_model,
     )
-
-
-def _fallback_response(error: Exception) -> dict[str, Any]:
-    return {
-        "summary": f"Video Agent 执行失败：{type(error).__name__}: {error}",
-        "operations": [],
-        "rendered_files": [],
-    }
-
-
-async def run_video_node(state: AgentState) -> AgentState:
-    tools = toolbox(state)
-    try:
-        response, usage_records, tool_calls = await run_agent(
-            state, "video_agent", create_video_agent(tools), tools
-        )
-    except Exception as exc:  # noqa: BLE001 - agent failures fall back to a structured response.
-        response, usage_records, tool_calls = _fallback_response(exc), [], []
-
-    summary = str(response.get("summary") or "Video Agent 完成。")
-    rendered_files = rendered_files_from_tool_trace(tool_calls)
-    outputs = dict(state.get("agent_outputs", {}))
-    outputs["video_agent"] = {
-        "summary": summary,
-        "operations": [],
-        "rendered_files": rendered_files,
-        "tool_calls": tool_calls,
-    }
-    return {
-        "agent_outputs": outputs,
-        "usage_records": [*state.get("usage_records", []), *usage_records],
-        "trace": trace(
-            state,
-            "Video Agent(create_agent) 执行完成",
-            summary,
-            {
-                "available_tools": tools.names_for("video_agent"),
-                "rendered_files": rendered_files,
-                "tool_calls": tool_calls,
-            },
-        ),
-    }

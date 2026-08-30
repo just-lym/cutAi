@@ -3,9 +3,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models import VideoType
+
 
 class ProjectCreate(BaseModel):
     name: str
+    video_type: VideoType = VideoType.TALKING_HEAD
     width: int = 1920
     height: int = 1080
     frame_rate: float = 30.0
@@ -17,12 +20,17 @@ class ProjectRead(BaseModel):
     id: UUID
     owner_id: str
     name: str
+    video_type: VideoType
     width: int
     height: int
     frame_rate: float
     duration_ms: int
     current_timeline_version: int
     status: str
+
+
+class ProjectUpdate(BaseModel):
+    video_type: VideoType
 
 
 class AssetRead(BaseModel):

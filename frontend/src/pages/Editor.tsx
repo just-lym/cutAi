@@ -319,7 +319,7 @@ export function Editor() {
           {rightTab === 'inspector' ? (
             <InspectorPanel projectId={projectId} timeline={timeline.data?.timeline_json} assets={assets.data ?? []} />
           ) : (
-            <AgentPanel projectId={projectId} />
+            <AgentPanel projectId={projectId} videoType={project.data?.video_type ?? 'TALKING_HEAD'} />
           )}
         </aside>
       </section>

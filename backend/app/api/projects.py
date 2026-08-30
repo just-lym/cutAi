@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Project, ProjectStatus, TimelineVersion, empty_timeline
-from app.schemas import ProjectCreate, ProjectRead
+from app.schemas import ProjectCreate, ProjectRead, ProjectUpdate
 
 router = APIRouter()
 
@@ -15,6 +15,7 @@ router = APIRouter()
 async def create_project(payload: ProjectCreate, db: AsyncSession = Depends(get_db)) -> Project:
     project = Project(
         name=payload.name,
+        video_type=payload.video_type.value,
         width=payload.width,
         height=payload.height,
         frame_rate=payload.frame_rate,
@@ -50,6 +51,21 @@ async def get_project(project_id: UUID, db: AsyncSession = Depends(get_db)) -> P
     project = await db.get(Project, project_id)
     if project is None or project.status == ProjectStatus.ARCHIVED:
         raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@router.patch("/{project_id}", response_model=ProjectRead)
+async def update_project(
+    project_id: UUID,
+    payload: ProjectUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> Project:
+    project = await db.get(Project, project_id)
+    if project is None or project.status == ProjectStatus.ARCHIVED:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.video_type = payload.video_type.value
+    await db.commit()
+    await db.refresh(project)
     return project
 
 

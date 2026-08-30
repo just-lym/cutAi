@@ -1,0 +1,101 @@
+COMMON_TOOLS = (
+    "get_project_timeline",
+    "get_project_assets",
+    "get_project_subtitles",
+    "get_supported_edit_operations",
+    "build_packed_transcript",
+    "find_transcript_gaps",
+    "build_timeline_edl",
+    "validate_edl",
+    "summarize_edl_sources",
+)
+
+COORDINATOR_TOOLS = (
+    *COMMON_TOOLS,
+    "search_project_assets",
+    "ffmpeg_check_available",
+    "ffmpeg_probe_asset",
+    "render_timeline_view",
+    "render_edl_preview",
+    "ffmpeg_extract_thumbnails",
+    "ffmpeg_detect_scene_changes",
+)
+
+AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
+    "vlog_director": COORDINATOR_TOOLS,
+    "talking_head_director": COORDINATOR_TOOLS,
+    "interview_director": COORDINATOR_TOOLS,
+    "vlog_pacing_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_probe_asset",
+        "ffmpeg_detect_silence",
+        "ffmpeg_remove_ranges",
+        "ffmpeg_extract_thumbnails",
+        "ffmpeg_detect_scene_changes",
+        "render_timeline_view",
+        "render_edl_preview",
+    ),
+    "speech_edit_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_probe_asset",
+        "ffmpeg_detect_silence",
+        "ffmpeg_remove_ranges",
+        "render_timeline_view",
+        "render_edl_preview",
+    ),
+    "dialogue_edit_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_probe_asset",
+        "ffmpeg_detect_silence",
+        "ffmpeg_remove_ranges",
+        "render_timeline_view",
+        "render_edl_preview",
+    ),
+    "subtitle_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_probe_asset",
+        "render_edl_preview",
+        "ffmpeg_burn_timeline_subtitles",
+    ),
+    "audio_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_probe_asset",
+        "ffmpeg_detect_silence",
+        "ffmpeg_remove_ranges",
+        "ffmpeg_change_volume",
+        "ffmpeg_apply_audio_fade",
+        "ffmpeg_normalize_loudness",
+    ),
+    "broll_agent": (
+        *COMMON_TOOLS,
+        "search_project_assets",
+        "ffmpeg_probe_asset",
+        "ffmpeg_cut_segment",
+        "ffmpeg_overlay_asset",
+        "ffmpeg_extract_frame",
+        "render_timeline_view",
+        "ffmpeg_extract_thumbnails",
+        "ffmpeg_detect_scene_changes",
+    ),
+    "video_agent": (
+        *COMMON_TOOLS,
+        "ffmpeg_check_available",
+        "ffmpeg_probe_asset",
+        "ffmpeg_cut_segment",
+        "ffmpeg_remove_ranges",
+        "ffmpeg_transcode_preview",
+        "ffmpeg_extract_frame",
+        "ffmpeg_extract_thumbnails",
+        "ffmpeg_crop_scale",
+        "ffmpeg_concat_assets",
+        "ffmpeg_detect_scene_changes",
+        "render_timeline_view",
+        "render_edl_preview",
+        "ffmpeg_burn_timeline_subtitles",
+    ),
+    "review": (*COMMON_TOOLS, "validate_edit_operations"),
+}
+
+
+def tool_names_for_agent(agent_name: str) -> list[str]:
+    return list(AGENT_TOOL_POLICIES.get(agent_name, COMMON_TOOLS))

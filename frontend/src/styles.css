@@ -60,9 +60,47 @@ a {
 }
 
 .project-create form {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   max-width: 720px;
   gap: 10px;
+}
+
+.video-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid #343944;
+  border-radius: 7px;
+  background: #121820;
+  padding: 3px;
+}
+
+.project-create .video-mode-switch {
+  grid-column: 1 / -1;
+}
+
+.project-create .video-mode-option,
+.video-mode-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #94a3b8;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.project-create .video-mode-option.active,
+.video-mode-option.active {
+  background: #27313d;
+  color: #f8fafc;
 }
 
 .project-create input,
@@ -701,6 +739,11 @@ a {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.agent-mode-switch {
+  flex: 0 0 auto;
+  margin: 0 0 10px;
 }
 
 .agent-log {

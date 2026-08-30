@@ -2,6 +2,7 @@ import { FormEvent, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Bot, Check, CircleDot, Loader2, RotateCcw, Send, X } from 'lucide-react'
 import { api, type AgentTraceStep, type EditPlan } from '../api/client'
+import { getVideoMode, VIDEO_MODE_OPTIONS, type VideoType } from '../constants/videoModes'
 import { useEditorStore } from '../stores/editor'
 
 type Decision = 'approved' | 'rejected'
@@ -28,7 +29,7 @@ function hasSubtitleOperation(plan: EditPlan) {
   return plan.operations.some((operation) => ['UPDATE_SUBTITLE', 'CREATE_SUBTITLE'].includes(operation.type))
 }
 
-export function AgentPanel({ projectId }: { projectId: string }) {
+export function AgentPanel({ projectId, videoType }: { projectId: string; videoType: VideoType }) {
   const [input, setInput] = useState('')
   const [reply, setReply] = useState('')
   const [trace, setTrace] = useState<AgentTraceStep[]>([])
@@ -42,6 +43,25 @@ export function AgentPanel({ projectId }: { projectId: string }) {
   const [lastRenderedFiles, setLastRenderedFiles] = useState<string[]>([])
   const queryClient = useQueryClient()
   const setBottomTab = useEditorStore((state) => state.setBottomTab)
+  const currentMode = getVideoMode(videoType)
+
+  const changeMode = useMutation({
+    mutationFn: (nextVideoType: VideoType) => api.projects.update(projectId, { video_type: nextVideoType }),
+    onSuccess: async (nextProject) => {
+      const nextMode = getVideoMode(nextProject.video_type)
+      setReply('')
+      setTrace([])
+      setPlan(null)
+      setDecisions({})
+      setLastRenderedFiles([])
+      setNotice(`已切换到${nextMode.label}多 Agent 模式。`)
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['projects'] })
+    },
+    onError: (error) => {
+      setSendError(error instanceof Error ? error.message : '切换创作模式失败')
+    }
+  })
 
   const approve = useMutation({
     mutationFn: () => {
@@ -121,7 +141,7 @@ export function AgentPanel({ projectId }: { projectId: string }) {
     setTrace([
       {
         title: '提交剪辑目标',
-        detail: `正在把指令发送给 Agent：${content}`
+        detail: `正在把指令发送给${currentMode.label}创作团队：${content}`
       }
     ])
     let receivedPlan = false
@@ -134,7 +154,7 @@ export function AgentPanel({ projectId }: { projectId: string }) {
             ...current,
             {
               title: 'Agent 开始思考',
-              detail: String(event.detail ?? '主 Agent 正在选择工具和专业 Agent。'),
+              detail: String(event.detail ?? `${currentMode.director}正在选择工具和专业 Agent。`),
               data: event
             }
           ])
@@ -233,8 +253,23 @@ export function AgentPanel({ projectId }: { projectId: string }) {
   return (
     <aside className="panel agent-panel">
       <div className="panel-title">
-        <h2>Agent</h2>
+        <h2>{currentMode.label} Agent</h2>
         <Bot size={18} />
+      </div>
+      <div className="agent-mode-switch video-mode-switch" aria-label="创作模式">
+        {VIDEO_MODE_OPTIONS.map(({ value, label, Icon }) => (
+          <button
+            type="button"
+            className={videoType === value ? 'video-mode-option active' : 'video-mode-option'}
+            key={value}
+            onClick={() => changeMode.mutate(value)}
+            disabled={isSending || changeMode.isPending}
+            title={`切换到${label}模式`}
+          >
+            <Icon size={14} />
+            {label}
+          </button>
+        ))}
       </div>
       <div className="agent-log">
         {isSending ? (

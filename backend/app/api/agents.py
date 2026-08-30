@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import stream_agent_graph
+from app.agents.modes import get_agent_mode
 from app.cloud_api.cost_tracker import record_usage
 from app.config import settings
 from app.database import get_db
@@ -89,6 +90,7 @@ def _asset_context(asset: Asset) -> dict[str, Any]:
 def build_agent_failure_response(
     content: str,
     timeline: dict[str, Any],
+    mode_label: str,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     trace: list[dict[str, Any]] = [
         {
@@ -105,8 +107,8 @@ def build_agent_failure_response(
     trace.append(
         {
             "title": "未生成本地伪计划",
-            "detail": "当前项目只接受 Main Agent 和工具调用产出的剪辑建议；本地兜底不会按关键词伪造操作。",
-            "data": {},
+            "detail": f"当前项目只接受{mode_label}模式 Agent 和工具调用产出的剪辑建议；本地兜底不会按关键词伪造操作。",
+            "data": {"creative_mode": mode_label},
         }
     )
     return "Agent 执行失败，未生成剪辑计划。请检查模型服务或稍后重试。", [], trace
@@ -145,6 +147,7 @@ async def _persist_agent_result(
     trace: list[dict[str, Any]],
     usage_records: list[dict[str, Any]],
     rendered_files: list[str] | None = None,
+    created_by_agent: str = "creative-director",
 ) -> AgentRunResult:
     await _record_agent_usage(db, project_id, session, usage_records)
 
@@ -158,7 +161,7 @@ async def _persist_agent_result(
             operations=operations,
             conflicts=conflicts,
             estimated_cost=0.0,
-            created_by_agent="main-creative-agent",
+            created_by_agent=created_by_agent,
         )
         db.add(plan)
         await db.flush()
@@ -208,14 +211,31 @@ async def stream_agent_message(
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    mode = get_agent_mode(project.video_type)
     session = await _get_or_create_session(db, project_id)
     timeline = await get_latest_timeline(db, project_id)
     asset_result = await db.execute(select(Asset).where(Asset.project_id == project_id))
     assets = [_asset_context(asset) for asset in asset_result.scalars()]
 
     async def event_stream():
-        yield _sse("thinking", {"agent": "main_agent", "detail": "开始读取项目状态并运行 Main Creative Agent。"})
-        yield _sse("progress", {"stage": "start", "detail": "已提交给 Agent，正在准备项目上下文。", "progress": 0.05})
+        yield _sse(
+            "thinking",
+            {
+                "agent": mode.coordinator_name,
+                "video_type": mode.video_type,
+                "mode_label": mode.label,
+                "team": list(mode.team),
+                "detail": f"正在进入{mode.label}多 Agent 模式并读取项目状态。",
+            },
+        )
+        yield _sse(
+            "progress",
+            {
+                "stage": "start",
+                "detail": f"已提交给{mode.label}创作团队，正在准备项目上下文。",
+                "progress": 0.05,
+            },
+        )
         final_state: dict[str, Any] | None = None
         streamed_trace_count = 0
 
@@ -232,6 +252,7 @@ async def stream_agent_message(
                         timeline_version=timeline.version,
                         timeline=timeline.timeline_json,
                         assets=assets,
+                        video_type=mode.video_type,
                     ):
                         final_state = dict(state)
                         trace_steps = list(final_state.get("trace") or [])
@@ -269,8 +290,8 @@ async def stream_agent_message(
                     yield _sse(
                         "status",
                         {
-                            "agent": "main_agent",
-                            "detail": "Agent 正在调用模型或工具，任务仍在进行中。",
+                            "agent": mode.coordinator_name,
+                            "detail": f"{mode.label}创作团队正在调用模型或工具，任务仍在进行中。",
                             "elapsed_seconds": heartbeat_count * 2,
                         },
                     )
@@ -306,6 +327,7 @@ async def stream_agent_message(
                 trace,
                 usage_records,
                 rendered_files,
+                str(final_state.get("coordinator_name") or mode.coordinator_name),
             )
         except Exception as exc:  # noqa: BLE001 - stream should degrade into a usable local plan.
             await db.rollback()
@@ -319,7 +341,11 @@ async def stream_agent_message(
                 },
             )
             try:
-                reply, operations, trace = build_agent_failure_response(payload.content, timeline.timeline_json)
+                reply, operations, trace = build_agent_failure_response(
+                    payload.content,
+                    timeline.timeline_json,
+                    mode.label,
+                )
                 response = await _persist_agent_result(
                     db,
                     project_id,
@@ -331,6 +357,7 @@ async def stream_agent_message(
                     trace,
                     [],
                     [],
+                    mode.coordinator_name,
                 )
             except Exception as fallback_exc:  # noqa: BLE001 - report terminal stream failure to the UI.
                 yield _sse("error", {"message": f"{type(fallback_exc).__name__}: {fallback_exc}"})
@@ -347,7 +374,16 @@ async def stream_agent_message(
                 },
             )
         yield _sse("token", {"content": response.reply})
-        yield _sse("done", {"session_id": str(response.session_id), "total_cost": response.total_cost})
+        yield _sse(
+            "done",
+            {
+                "session_id": str(response.session_id),
+                "total_cost": response.total_cost,
+                "video_type": mode.video_type,
+                "coordinator": mode.coordinator_name,
+                "team": list(mode.team),
+            },
+        )
 
     return StreamingResponse(
         event_stream(),

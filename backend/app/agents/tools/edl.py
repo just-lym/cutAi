@@ -238,7 +238,7 @@ def build_edl_tools(context: AgentToolContext) -> list[AgentTool]:
 
     @tool("summarize_edl_sources")
     async def summarize_edl_sources(edl_path: str | None = None, edl: dict | None = None) -> dict:
-        """概览 EDL 使用了哪些素材和总输出时长，适合 Main Agent 在执行前解释创作方案。"""
+        """概览 EDL 使用了哪些素材和总输出时长，适合创作导演 Agent 在执行前解释方案。"""
         try:
             loaded = _load_edl(context, edl_path, edl)
         except (OSError, json.JSONDecodeError) as exc:
