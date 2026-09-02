@@ -40,6 +40,8 @@ def _timeline_ranges_from_clips(clips: list[dict[str, Any]]) -> list[dict[str, A
                 "timeline_end_ms": timeline_end_ms,
                 "source_in_ms": source_in_ms,
                 "source_out_ms": source_out_ms,
+                "speed": float(clip.get("speed") or 1.0),
+                "volume": float(clip.get("volume") if clip.get("volume") is not None else 1.0),
             }
         )
     return ranges

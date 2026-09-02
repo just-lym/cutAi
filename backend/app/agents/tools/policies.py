@@ -19,6 +19,11 @@ COORDINATOR_TOOLS = (
     "render_edl_preview",
     "ffmpeg_extract_thumbnails",
     "ffmpeg_detect_scene_changes",
+    "qwen_vl_inspect_range",
+    "ffmpeg_detect_beats",
+    "qwen_audio_analyze_range",
+    "asr_transcribe_asset",
+    "recommend_edit_strategy",
 )
 
 AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
@@ -32,6 +37,11 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "ffmpeg_remove_ranges",
         "ffmpeg_extract_thumbnails",
         "ffmpeg_detect_scene_changes",
+        "qwen_vl_inspect_range",
+        "ffmpeg_detect_beats",
+        "qwen_audio_analyze_range",
+        "asr_transcribe_asset",
+        "recommend_edit_strategy",
         "render_timeline_view",
         "render_edl_preview",
     ),
@@ -42,6 +52,10 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "ffmpeg_remove_ranges",
         "render_timeline_view",
         "render_edl_preview",
+        "qwen_vl_inspect_range",
+        "recommend_edit_strategy",
+        "qwen_audio_analyze_range",
+        "asr_transcribe_asset",
     ),
     "dialogue_edit_agent": (
         *COMMON_TOOLS,
@@ -50,12 +64,17 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "ffmpeg_remove_ranges",
         "render_timeline_view",
         "render_edl_preview",
+        "qwen_vl_inspect_range",
+        "recommend_edit_strategy",
+        "qwen_audio_analyze_range",
+        "asr_transcribe_asset",
     ),
     "subtitle_agent": (
         *COMMON_TOOLS,
         "ffmpeg_probe_asset",
         "render_edl_preview",
         "ffmpeg_burn_timeline_subtitles",
+        "asr_transcribe_asset",
     ),
     "audio_agent": (
         *COMMON_TOOLS,
@@ -65,6 +84,8 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "ffmpeg_change_volume",
         "ffmpeg_apply_audio_fade",
         "ffmpeg_normalize_loudness",
+        "ffmpeg_detect_beats",
+        "qwen_audio_analyze_range",
     ),
     "broll_agent": (
         *COMMON_TOOLS,
@@ -76,6 +97,9 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "render_timeline_view",
         "ffmpeg_extract_thumbnails",
         "ffmpeg_detect_scene_changes",
+        "qwen_vl_inspect_range",
+        "recommend_edit_strategy",
+        "qwen_audio_analyze_range",
     ),
     "video_agent": (
         *COMMON_TOOLS,
@@ -92,6 +116,11 @@ AGENT_TOOL_POLICIES: dict[str, tuple[str, ...]] = {
         "render_timeline_view",
         "render_edl_preview",
         "ffmpeg_burn_timeline_subtitles",
+        "qwen_vl_inspect_range",
+        "ffmpeg_detect_beats",
+        "recommend_edit_strategy",
+        "qwen_audio_analyze_range",
+        "asr_transcribe_asset",
     ),
     "review": (*COMMON_TOOLS, "validate_edit_operations"),
 }

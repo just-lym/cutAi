@@ -12,6 +12,8 @@ class AgentToolContext:
     timeline_version: int | None
     timeline: dict[str, Any]
     assets: list[dict[str, Any]]
+    preferences: dict[str, Any] | None = None
+    selection: dict[str, Any] | None = None
 
     @property
     def output_dir(self) -> Path:
@@ -46,6 +48,8 @@ class AgentToolContext:
         return ids
 
     def find_asset(self, asset_id: str | None = None, media_only: bool = False) -> dict[str, Any] | None:
+        if not asset_id:
+            asset_id = str((self.selection or {}).get("asset_id") or "") or None
         if asset_id:
             return next((asset for asset in self.assets if str(asset.get("id")) == str(asset_id)), None)
 
@@ -70,6 +74,26 @@ class AgentToolContext:
         )
 
 
+def diagnosis_summary(asset: dict[str, Any]) -> dict[str, Any] | None:
+    diagnosis = (asset.get("metadata") or {}).get("diagnosis")
+    if not isinstance(diagnosis, dict):
+        return None
+    beats = diagnosis.get("audio_beats") or {}
+    visual = diagnosis.get("visual") or {}
+    scenes = diagnosis.get("scenes") or []
+    return {
+        "status": diagnosis.get("status"),
+        "scene_count": len(scenes),
+        "bpm": beats.get("bpm"),
+        "beat_confidence": beats.get("confidence"),
+        "visual_summary": visual.get("summary"),
+        "quality_issues": list(visual.get("quality_issues") or [])[:8],
+        "strong_moments": list(visual.get("strong_moments") or [])[:8],
+        "editing_suggestions": list(visual.get("editing_suggestions") or [])[:8],
+        "issues": list(diagnosis.get("issues") or [])[:8],
+    }
+
+
 def asset_summary(context: AgentToolContext, asset: dict[str, Any], include_path: bool = False) -> dict[str, Any]:
     summary = {
         "id": asset.get("id"),
@@ -80,6 +104,7 @@ def asset_summary(context: AgentToolContext, asset: dict[str, Any], include_path
         "height": asset.get("height"),
         "frame_rate": asset.get("frame_rate"),
         "processing_status": asset.get("processing_status"),
+        "diagnosis": diagnosis_summary(asset),
     }
     if include_path:
         summary["file_path"] = str(context.asset_path(asset))

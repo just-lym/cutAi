@@ -9,6 +9,21 @@ type Props = {
   assets: Asset[]
 }
 
+type AssetDiagnosis = {
+  visual?: { summary?: string }
+  audio_beats?: { bpm?: number | null }
+  scenes?: unknown[]
+}
+
+function diagnosisLabel(asset: Asset) {
+  const diagnosis = asset.metadata?.diagnosis as AssetDiagnosis | undefined
+  if (!diagnosis) return ''
+  if (diagnosis.visual?.summary) return diagnosis.visual.summary
+  if (diagnosis.audio_beats?.bpm) return `节拍 ${diagnosis.audio_beats.bpm} BPM`
+  if (diagnosis.scenes) return `识别 ${diagnosis.scenes.length} 个场景变化`
+  return '素材诊断已完成'
+}
+
 export function AssetPanel({ projectId, assets }: Props) {
   const queryClient = useQueryClient()
   const selectedAssetId = useEditorStore((state) => state.selectedAssetId)
@@ -86,12 +101,19 @@ export function AssetPanel({ projectId, assets }: Props) {
           <div
             className={selectedAssetId === asset.id ? 'asset-row selected' : 'asset-row'}
             key={asset.id}
-            title={asset.processing_error ?? undefined}
+            title={asset.processing_error ?? asset.original_name}
             onClick={() => selectAsset(asset.id)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') selectAsset(asset.id)
+            }}
+            role="button"
+            tabIndex={0}
+            aria-pressed={selectedAssetId === asset.id}
           >
             <div className="asset-main">
               <span className="asset-kind">{iconFor(asset)}</span>
               <span>{asset.original_name}</span>
+              {diagnosisLabel(asset) ? <small className="asset-diagnosis">{diagnosisLabel(asset)}</small> : null}
               <small>{asset.type}{duration(asset) ? ` · ${duration(asset)}` : ''}</small>
             </div>
             <div className="asset-actions">

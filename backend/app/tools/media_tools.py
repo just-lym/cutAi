@@ -1,9 +1,13 @@
 import asyncio
 import json
+import math
 import re
 import shutil
+import statistics
 import subprocess
 import threading
+from array import array
+from itertools import pairwise
 from pathlib import Path
 
 from app.config import settings
@@ -186,10 +190,78 @@ def video_info_from_probe(probe: dict) -> tuple[int | None, int | None, float | 
     return None, None, None
 
 
+def _parse_loudness_report(text: str) -> dict[str, float | None]:
+    matches = re.findall(r'\{\s*"input_i".*?\}', text, re.DOTALL)
+    if not matches:
+        raise MediaToolError("ffmpeg did not return a loudness report")
+    payload = json.loads(matches[-1])
+
+    def number(key: str) -> float | None:
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    return {
+        "integrated_lufs": number("input_i"),
+        "true_peak_dbfs": number("input_tp"),
+        "loudness_range_lu": number("input_lra"),
+        "threshold_lufs": number("input_thresh"),
+    }
+
+
+async def analyze_audio_loudness(input_path: Path) -> dict[str, float | None]:
+    cmd = [
+        _tool_path("ffmpeg"),
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-af",
+        "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        raise MediaToolError(f"loudness analysis failed: {exc}") from exc
+    stderr = proc.stderr.decode("utf-8", errors="ignore")
+    if proc.returncode != 0:
+        raise MediaToolError(stderr[-4000:] or "loudness analysis failed")
+    return _parse_loudness_report(stderr)
+
+
 async def extract_audio(input_path: Path, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [_tool_path("ffmpeg"), "-y", "-i", str(input_path), "-ar", "16000", "-ac", "1", str(output_path)]
     await _run_media_command(cmd, "ffmpeg failed")
+    return output_path
+
+
+async def extract_audio_range(
+    input_path: Path,
+    output_path: Path,
+    start_ms: int = 0,
+    end_ms: int | None = None,
+) -> Path:
+    if start_ms < 0 or (end_ms is not None and end_ms <= start_ms):
+        raise MediaToolError("Invalid audio extraction range")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [_tool_path("ffmpeg"), "-y", "-ss", f"{start_ms / 1000:.3f}", "-i", str(input_path)]
+    if end_ms is not None:
+        cmd.extend(["-t", f"{(end_ms - start_ms) / 1000:.3f}"])
+    cmd.extend(["-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(output_path)])
+    await _run_media_command(cmd, "audio range extraction failed")
     return output_path
 
 
@@ -245,6 +317,19 @@ async def concatenate_media(input_paths: list[Path], output_path: Path, cancel_k
     return output_path
 
 
+def _atempo_filters(speed: float) -> list[str]:
+    remaining = max(0.125, min(8.0, speed))
+    factors: list[float] = []
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return [f"atempo={factor:.6f}" for factor in factors]
+
+
 async def render_edl_ranges(
     ranges: list[dict],
     asset_paths: dict[str, Path],
@@ -277,14 +362,21 @@ async def render_edl_ranges(
             if end_ms <= start_ms:
                 raise MediaToolError(f"range[{index}] requires source_in_ms < source_out_ms")
 
-            duration_s = (end_ms - start_ms) / 1000
-            fade_s = min(max(0, audio_fade_ms) / 1000, duration_s / 3)
+            source_duration_s = (end_ms - start_ms) / 1000
+            speed = max(0.125, min(8.0, float(item.get("speed") or 1.0)))
+            volume = max(
+                0.0,
+                min(2.0, float(item.get("volume") if item.get("volume") is not None else 1.0)),
+            )
+            output_duration_s = source_duration_s / speed
+            fade_s = min(max(0, audio_fade_ms) / 1000, output_duration_s / 3)
             part_path = temp_dir / f"part_{index:04d}.mp4"
             probe = await probe_media(input_path)
             video_filters = [
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease",
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
                 "setsar=1",
+                f"setpts=PTS/{speed:.6f}",
             ]
             if frame_rate:
                 video_filters.append(f"fps={max(1.0, min(120.0, frame_rate)):.3f}")
@@ -296,7 +388,7 @@ async def render_edl_ranges(
                 "-i",
                 str(input_path),
                 "-t",
-                f"{duration_s:.3f}",
+                f"{source_duration_s:.3f}",
                 "-vf",
                 ",".join(video_filters),
                 "-map",
@@ -304,14 +396,19 @@ async def render_edl_ranges(
                 "-map",
                 "0:a?",
             ]
-            if _has_stream(probe, "audio") and fade_s > 0:
+            if _has_stream(probe, "audio"):
+                audio_filters = [*_atempo_filters(speed), f"volume={volume:.3f}"]
+                if fade_s > 0:
+                    audio_filters.extend(
+                        [
+                            f"afade=t=in:st=0:d={fade_s:.3f}",
+                            f"afade=t=out:st={max(0, output_duration_s - fade_s):.3f}:d={fade_s:.3f}",
+                        ]
+                    )
                 cmd.extend(
                     [
                         "-af",
-                        (
-                            f"afade=t=in:st=0:d={fade_s:.3f},"
-                            f"afade=t=out:st={max(0, duration_s - fade_s):.3f}:d={fade_s:.3f}"
-                        ),
+                        ",".join(audio_filters),
                     ]
                 )
             cmd.extend(
@@ -729,6 +826,89 @@ async def detect_scene_changes(
             scenes.append({"at_ms": at_ms})
             last_ms = at_ms
     return scenes
+
+
+async def detect_audio_beats(
+    input_path: Path,
+    start_ms: int = 0,
+    end_ms: int | None = None,
+    max_beats: int = 240,
+) -> dict:
+    """Estimate tempo and beat positions from an onset-energy envelope without optional DSP packages."""
+    if start_ms < 0 or (end_ms is not None and end_ms <= start_ms):
+        raise MediaToolError("Invalid beat analysis range")
+    sample_rate = 8000
+    duration_ms = min((end_ms - start_ms) if end_ms else 20 * 60 * 1000, 20 * 60 * 1000)
+    cmd = [
+        _tool_path("ffmpeg"),
+        "-v",
+        "error",
+        "-ss",
+        f"{start_ms / 1000:.3f}",
+        "-i",
+        str(input_path),
+        "-t",
+        f"{duration_ms / 1000:.3f}",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "s16le",
+        "-",
+    ]
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise MediaToolError(proc.stderr.decode("utf-8", errors="ignore") or "beat detection failed")
+    samples = array("h")
+    samples.frombytes(proc.stdout)
+    actual_duration_ms = int(len(samples) / sample_rate * 1000)
+    window = max(1, sample_rate // 20)
+    energies = [
+        math.sqrt(sum(value * value for value in samples[index : index + window]) / window)
+        for index in range(0, len(samples) - window + 1, window)
+    ]
+    if len(energies) < 20 or max(energies, default=0) <= 1:
+        return {
+            "bpm": None,
+            "confidence": 0.0,
+            "beats": [],
+            "analyzed_range_ms": [start_ms, start_ms + actual_duration_ms],
+        }
+    onsets = []
+    for index, energy in enumerate(energies):
+        baseline = statistics.fmean(energies[max(0, index - 10) : index + 1])
+        onsets.append(max(0.0, energy - baseline))
+    mean = statistics.fmean(onsets)
+    deviation = statistics.pstdev(onsets)
+    threshold = mean + deviation * 1.25
+    peak_indices: list[int] = []
+    min_gap_windows = 4
+    for index in range(1, len(onsets) - 1):
+        if onsets[index] < threshold or onsets[index] < onsets[index - 1] or onsets[index] < onsets[index + 1]:
+            continue
+        if peak_indices and index - peak_indices[-1] < min_gap_windows:
+            if onsets[index] > onsets[peak_indices[-1]]:
+                peak_indices[-1] = index
+            continue
+        peak_indices.append(index)
+    beat_times = [start_ms + index * 50 for index in peak_indices]
+    intervals = [right - left for left, right in pairwise(beat_times) if 300 <= right - left <= 1200]
+    bpm = round(60000 / statistics.median(intervals), 1) if intervals else None
+    confidence = min(1.0, len(intervals) / max(8, actual_duration_ms / 5000)) if bpm else 0.0
+    return {
+        "bpm": bpm,
+        "confidence": round(confidence, 3),
+        "beats": [{"at_ms": value} for value in beat_times[: max(1, min(max_beats, 1000))]],
+        "analyzed_range_ms": [start_ms, start_ms + actual_duration_ms],
+    }
 
 
 def _ffmpeg_filter_path(path: Path) -> str:

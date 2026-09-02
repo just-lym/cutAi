@@ -6,7 +6,7 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agents.base import user_request
+from app.agents.base import compact_history, user_request
 from app.agents.state import AgentState
 from app.agents.tools import AgentToolbox
 from app.cloud_api.langchain_chat_model import ChatDashScope
@@ -142,6 +142,10 @@ async def run_agent(
         "delegated_task": state.get("delegated_task"),
         "project_id": state.get("project_id"),
         "agent_outputs": state.get("agent_outputs", {}),
+        "history": compact_history(state.get("history", []), limit=20),
+        "preferences": state.get("preferences", {}),
+        "selection": state.get("selection"),
+        "evidence": state.get("evidence", {}),
         "available_tools": toolbox.names_for(agent_name),
         "required_final_output": "JSON object only",
     }

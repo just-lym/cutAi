@@ -1,7 +1,8 @@
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import VideoType
 
@@ -52,6 +53,7 @@ class AssetRead(BaseModel):
     processing_status: str
     processing_step: str | None = None
     processing_error: str | None = None
+    metadata: dict[str, Any] | None = Field(default=None, validation_alias="metadata_")
 
 
 class TimelineRead(BaseModel):
@@ -69,13 +71,29 @@ class TimelineCommit(BaseModel):
     change_summary: str = "Manual edit"
 
 
+class AgentSelection(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    asset_id: UUID | None = None
+    clip_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "AgentSelection":
+        if self.end_ms <= self.start_ms:
+            raise ValueError("selection.end_ms must be greater than selection.start_ms")
+        return self
+
+
 class AgentMessage(BaseModel):
     content: str
+    selection: AgentSelection | None = None
 
 
 class ApprovalRequest(BaseModel):
     approved_indices: list[int] | None = None
     rejected_indices: list[int] | None = None
+    feedback_note: str | None = None
+    render_after_apply: bool = True
 
 
 class ApprovalResponse(BaseModel):
@@ -84,6 +102,19 @@ class ApprovalResponse(BaseModel):
     rejected_count: int
     plan_status: str
     timeline_version: int | None = None
+    render_job_id: UUID | None = None
+    render_status: str | None = None
+
+
+class AgentHistoryItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    session_id: UUID
+    role: str
+    content: str
+    metadata: dict[str, Any] | None = Field(default=None, validation_alias="metadata_")
+    created_at: datetime
 
 
 class SubtitleUpdate(BaseModel):

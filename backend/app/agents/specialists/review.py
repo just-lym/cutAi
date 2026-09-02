@@ -2,6 +2,7 @@ from typing import Any
 
 from app.agents.base import (
     collect_operations,
+    constrain_operations_to_selection,
     normalize_operations,
     toolbox,
     trace,
@@ -49,6 +50,12 @@ async def run_review_node(state: AgentState) -> AgentState:
     tools = toolbox(state)
     proposed_operations = collect_operations(state.get("agent_outputs", {}))
     operations, deterministic_conflicts = valid_operations(proposed_operations, state.get("timeline", {}))
+    operations, selection_conflicts = constrain_operations_to_selection(
+        operations,
+        state.get("timeline", {}),
+        state.get("selection"),
+    )
+    deterministic_conflicts.extend(selection_conflicts)
     try:
         response, usage_records, tool_calls = await run_agent(
             {
@@ -68,9 +75,15 @@ async def run_review_node(state: AgentState) -> AgentState:
     plan = response.get("plan") if isinstance(response.get("plan"), dict) else {}
     operations = normalize_operations(plan.get("operations")) or operations
     operations, review_conflicts = valid_operations(operations, state.get("timeline", {}))
+    operations, selection_conflicts = constrain_operations_to_selection(
+        operations,
+        state.get("timeline", {}),
+        state.get("selection"),
+    )
     conflicts = [
         *deterministic_conflicts,
         *review_conflicts,
+        *selection_conflicts,
         *[str(item) for item in plan.get("conflicts", []) if item],
     ]
     summary = str(plan.get("summary") or f"Review Agent 合并出 {len(operations)} 条编辑建议。")

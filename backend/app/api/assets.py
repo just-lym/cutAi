@@ -18,6 +18,7 @@ from app.database import get_db
 from app.models import Asset, AssetType, ProcessingStatus, Project, TimelineVersion
 from app.schemas import AssetRead
 from app.services.executor import get_latest_timeline
+from app.services.media_intelligence import diagnose_asset
 from app.tools.media_tools import (
     duration_ms_from_probe,
     generate_browser_proxy,
@@ -198,6 +199,18 @@ async def _process_metadata(path: Path, asset: Asset) -> list[dict] | None:
                 asset.proxy_path = _relative_to_data_root(proxy_path)
         elif asset.type == AssetType.SUBTITLE:
             cues = parse_srt(path.read_text(encoding="utf-8"))
+        if asset.type in {AssetType.VIDEO, AssetType.AUDIO, AssetType.IMAGE}:
+            asset.processing_step = "diagnosis"
+            diagnosis = await diagnose_asset(
+                path,
+                asset.type.value,
+                settings.projects_root / str(asset.project_id),
+                duration_ms=asset.duration_ms,
+                probe=(asset.metadata_ or {}).get("probe"),
+            )
+            asset.metadata_ = {**(asset.metadata_ or {}), "diagnosis": diagnosis}
+            if not cues and diagnosis.get("transcript_cues"):
+                cues = list(diagnosis["transcript_cues"])
         asset.processing_status = ProcessingStatus.COMPLETED
         asset.processing_step = None
         asset.processing_error = None

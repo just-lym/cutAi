@@ -5,6 +5,7 @@ from app.agents.tools.context import AgentToolContext
 from app.agents.tools.edl import build_edl_tools
 from app.agents.tools.ffmpeg import build_ffmpeg_tools
 from app.agents.tools.inspection import build_inspection_tools
+from app.agents.tools.intelligence import build_intelligence_tools
 from app.agents.tools.policies import tool_names_for_agent
 from app.agents.tools.schema import AgentTool
 from app.agents.tools.subtitles import build_subtitle_tools
@@ -20,8 +21,12 @@ class AgentToolbox:
         timeline_version: int | None,
         timeline: dict[str, Any],
         assets: list[dict[str, Any]],
+        preferences: dict[str, Any] | None = None,
+        selection: dict[str, Any] | None = None,
     ) -> None:
-        self.context = AgentToolContext(project_id, project_dir, timeline_version, timeline, assets)
+        self.context = AgentToolContext(
+            project_id, project_dir, timeline_version, timeline, assets, preferences, selection
+        )
         tools = [
             *build_timeline_tools(self.context),
             *build_asset_tools(self.context),
@@ -29,6 +34,7 @@ class AgentToolbox:
             *build_transcript_tools(self.context),
             *build_edl_tools(self.context),
             *build_inspection_tools(self.context),
+            *build_intelligence_tools(self.context),
             *build_ffmpeg_tools(self.context),
         ]
         self._tools = {tool.name: tool for tool in tools}

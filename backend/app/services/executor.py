@@ -52,25 +52,127 @@ def _timeline_end(timeline: dict[str, Any]) -> int:
     return end_ms
 
 
-def _shift_after_delete(items: list[dict[str, Any]], start_ms: int, end_ms: int) -> list[dict[str, Any]]:
+def _shift_timed_items(items: list[dict[str, Any]], start_ms: int, end_ms: int) -> list[dict[str, Any]]:
     delta = end_ms - start_ms
     kept: list[dict[str, Any]] = []
     for item in items:
         item_start = int(item.get("timeline_start_ms", item.get("start_ms", 0)))
         item_end = int(item.get("timeline_end_ms", item.get("end_ms", item_start)))
+        next_item = copy.deepcopy(item)
         if item_end <= start_ms:
-            kept.append(item)
+            kept.append(next_item)
             continue
         if item_start >= end_ms:
-            item = copy.deepcopy(item)
-            if "timeline_start_ms" in item:
-                item["timeline_start_ms"] -= delta
-                item["timeline_end_ms"] -= delta
+            if "timeline_start_ms" in next_item:
+                next_item["timeline_start_ms"] -= delta
+                next_item["timeline_end_ms"] -= delta
             else:
-                item["start_ms"] -= delta
-                item["end_ms"] -= delta
-            kept.append(item)
+                next_item["start_ms"] -= delta
+                next_item["end_ms"] -= delta
+            kept.append(next_item)
+            continue
+        if item_start < start_ms and item_end > end_ms:
+            if "timeline_start_ms" in next_item:
+                speed = float(next_item.get("speed") or 1.0)
+                left = copy.deepcopy(next_item)
+                right = copy.deepcopy(next_item)
+                left["timeline_end_ms"] = start_ms
+                left["source_out_ms"] = int(
+                    int(next_item.get("source_in_ms") or 0) + (start_ms - item_start) * speed
+                )
+                right["id"] = str(uuid.uuid4())
+                right["timeline_start_ms"] = start_ms
+                right["timeline_end_ms"] = item_end - delta
+                right["source_in_ms"] = int(
+                    int(next_item.get("source_in_ms") or 0) + (end_ms - item_start) * speed
+                )
+                kept.extend((left, right))
+            else:
+                next_item["end_ms"] = item_end - delta
+                kept.append(next_item)
+            continue
+        if item_start < start_ms < item_end <= end_ms:
+            if "timeline_start_ms" in next_item:
+                speed = float(next_item.get("speed") or 1.0)
+                next_item["timeline_end_ms"] = start_ms
+                next_item["source_out_ms"] = int(
+                    int(next_item.get("source_in_ms") or 0) + (start_ms - item_start) * speed
+                )
+            else:
+                next_item["end_ms"] = start_ms
+            kept.append(next_item)
+            continue
+        if start_ms <= item_start < end_ms < item_end:
+            if "timeline_start_ms" in next_item:
+                speed = float(next_item.get("speed") or 1.0)
+                next_item["timeline_start_ms"] = start_ms
+                next_item["timeline_end_ms"] = item_end - delta
+                next_item["source_in_ms"] = int(
+                    int(next_item.get("source_in_ms") or 0) + (end_ms - item_start) * speed
+                )
+            else:
+                next_item["start_ms"] = start_ms
+                next_item["end_ms"] = item_end - delta
+            kept.append(next_item)
     return kept
+
+
+def _shift_point_items(
+    items: list[dict[str, Any]], start_ms: int, end_ms: int, field: str
+) -> list[dict[str, Any]]:
+    delta = end_ms - start_ms
+    shifted: list[dict[str, Any]] = []
+    for item in items:
+        at_ms = int(item.get(field) or 0)
+        if start_ms <= at_ms < end_ms:
+            continue
+        next_item = copy.deepcopy(item)
+        if at_ms >= end_ms:
+            next_item[field] = at_ms - delta
+        shifted.append(next_item)
+    return shifted
+
+
+def _shift_volume_changes(
+    items: list[dict[str, Any]], start_ms: int, end_ms: int
+) -> list[dict[str, Any]]:
+    finite = [item for item in items if int(item.get("end_ms", -1)) >= 0]
+    shifted = _shift_timed_items(finite, start_ms, end_ms)
+    delta = end_ms - start_ms
+    for item in items:
+        if int(item.get("end_ms", -1)) >= 0:
+            continue
+        next_item = copy.deepcopy(item)
+        item_start = int(next_item.get("start_ms") or 0)
+        if item_start >= end_ms:
+            next_item["start_ms"] = item_start - delta
+        elif item_start >= start_ms:
+            next_item["start_ms"] = start_ms
+        shifted.append(next_item)
+    return shifted
+
+
+def _apply_delete_range(timeline: dict[str, Any], start_ms: int, end_ms: int) -> None:
+    for track in timeline.get("tracks", []):
+        if "clips" in track:
+            track["clips"] = _shift_timed_items(track["clips"], start_ms, end_ms)
+        if "cues" in track:
+            track["cues"] = _shift_timed_items(track["cues"], start_ms, end_ms)
+        if "effects" in track:
+            effects = []
+            for effect in track["effects"]:
+                normalized = dict(effect)
+                normalized["end_ms"] = int(effect.get("start_ms") or 0) + int(effect.get("duration_ms") or 0)
+                effects.append(normalized)
+            shifted_effects = _shift_timed_items(effects, start_ms, end_ms)
+            for effect in shifted_effects:
+                effect["duration_ms"] = max(0, int(effect.pop("end_ms")) - int(effect.get("start_ms") or 0))
+            track["effects"] = [effect for effect in shifted_effects if effect["duration_ms"] > 0]
+    timeline["markers"] = _shift_point_items(timeline.get("markers", []), start_ms, end_ms, "at_ms")
+    timeline["volume_changes"] = _shift_volume_changes(
+        timeline.get("volume_changes", []), start_ms, end_ms
+    )
+    timeline["duration_ms"] = max(0, int(timeline.get("duration_ms", 0)) - (end_ms - start_ms))
 
 
 def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -79,18 +181,20 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
     if errors:
         raise ExecutionError("; ".join(errors))
 
-    for operation in operations:
+    delete_operations = sorted(
+        (operation for operation in operations if operation["type"] == "DELETE_RANGE"),
+        key=lambda operation: int(operation["start_ms"]),
+        reverse=True,
+    )
+    ordered_operations = [*delete_operations, *(op for op in operations if op["type"] != "DELETE_RANGE")]
+
+    for operation in ordered_operations:
         op_type = operation["type"]
 
         if op_type == "DELETE_RANGE":
             start_ms = int(operation["start_ms"])
             end_ms = int(operation["end_ms"])
-            for track in next_timeline.get("tracks", []):
-                if "clips" in track:
-                    track["clips"] = _shift_after_delete(track["clips"], start_ms, end_ms)
-                if "cues" in track:
-                    track["cues"] = _shift_after_delete(track["cues"], start_ms, end_ms)
-            next_timeline["duration_ms"] = max(0, int(next_timeline.get("duration_ms", 0)) - (end_ms - start_ms))
+            _apply_delete_range(next_timeline, start_ms, end_ms)
 
         elif op_type == "SET_VOLUME":
             next_timeline.setdefault("volume_changes", []).append(
@@ -159,6 +263,44 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
                     clip[field] = operation[field]
             next_timeline["duration_ms"] = max(int(next_timeline.get("duration_ms", 0)), _timeline_end(next_timeline))
 
+        elif op_type == "TRIM_CLIP":
+            _, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            source_in_ms = int(operation["source_in_ms"])
+            source_out_ms = int(operation["source_out_ms"])
+            speed = float(clip.get("speed") or 1.0)
+            clip["source_in_ms"] = source_in_ms
+            clip["source_out_ms"] = source_out_ms
+            clip["timeline_end_ms"] = int(clip.get("timeline_start_ms") or 0) + round(
+                (source_out_ms - source_in_ms) / speed
+            )
+
+        elif op_type == "MOVE_CLIP":
+            _, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            duration_ms = int(clip.get("timeline_end_ms") or 0) - int(clip.get("timeline_start_ms") or 0)
+            clip["timeline_start_ms"] = int(operation["timeline_start_ms"])
+            clip["timeline_end_ms"] = int(operation["timeline_start_ms"]) + duration_ms
+
+        elif op_type == "SET_CLIP_SPEED":
+            _, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            speed = float(operation["speed"])
+            clip["speed"] = speed
+            source_duration = int(clip.get("source_out_ms") or 0) - int(clip.get("source_in_ms") or 0)
+            clip["timeline_end_ms"] = int(clip.get("timeline_start_ms") or 0) + round(source_duration / speed)
+
+        elif op_type == "SET_CLIP_VOLUME":
+            _, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            clip["volume"] = float(operation["volume"])
+
+        elif op_type == "DUPLICATE_CLIP":
+            track, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            duplicate = copy.deepcopy(clip)
+            duplicate["id"] = str(operation.get("new_clip_id") or uuid.uuid4())
+            duration_ms = int(clip.get("timeline_end_ms") or 0) - int(clip.get("timeline_start_ms") or 0)
+            duplicate["timeline_start_ms"] = int(operation["timeline_start_ms"])
+            duplicate["timeline_end_ms"] = int(operation["timeline_start_ms"]) + duration_ms
+            track.setdefault("clips", []).append(duplicate)
+            track["clips"].sort(key=lambda item: int(item.get("timeline_start_ms") or 0))
+
         elif op_type == "DELETE_CLIP":
             track, clip = _find_clip(next_timeline, str(operation["clip_id"]))
             track["clips"] = [item for item in track.get("clips") or [] if item.get("id") != clip.get("id")]
@@ -175,6 +317,24 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
             effect = dict(operation["effect"])
             effect.setdefault("id", str(uuid.uuid4()))
             clip.setdefault("effects", []).append(effect)
+
+        elif op_type == "REMOVE_EFFECT":
+            _, clip = _find_clip(next_timeline, str(operation["clip_id"]))
+            effect_id = str(operation["effect_id"])
+            clip["effects"] = [
+                effect for effect in clip.get("effects") or [] if str(effect.get("id")) != effect_id
+            ]
+
+        elif op_type == "ADD_TRANSITION":
+            next_timeline.setdefault("transitions", []).append(
+                {
+                    "id": str(operation.get("transition_id") or uuid.uuid4()),
+                    "from_clip_id": str(operation["from_clip_id"]),
+                    "to_clip_id": str(operation["to_clip_id"]),
+                    "transition_type": str(operation.get("transition_type") or "crossfade"),
+                    "duration_ms": int(operation["duration_ms"]),
+                }
+            )
 
         elif op_type == "INSERT_BROLL_OVERLAY":
             broll_track = _track(next_timeline, "video-broll")
@@ -232,6 +392,16 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
             cues = subtitle_track.setdefault("cues", [])
             subtitle_track["cues"] = [cue for cue in cues if str(cue.get("id")) != cue_id]
 
+        elif op_type == "UPDATE_SUBTITLE_STYLE":
+            cue_id = str(operation["cue_id"])
+            subtitle_track = _track(next_timeline, "subtitles")
+            for cue in subtitle_track.setdefault("cues", []):
+                if str(cue.get("id")) == cue_id:
+                    style = dict(cue.get("style") or {})
+                    style.update(operation["style"])
+                    cue["style"] = style
+                    break
+
         elif op_type == "ADD_MARKER":
             next_timeline.setdefault("markers", []).append(
                 {
@@ -241,6 +411,12 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
                     "color": str(operation.get("color") or "purple"),
                 }
             )
+
+        elif op_type == "REMOVE_MARKER":
+            marker_id = str(operation["marker_id"])
+            next_timeline["markers"] = [
+                marker for marker in next_timeline.get("markers", []) if str(marker.get("id")) != marker_id
+            ]
 
         elif op_type in {"FADE_IN", "FADE_OUT"}:
             original_audio = _track(next_timeline, "audio-original")
@@ -253,6 +429,7 @@ def apply_operations(timeline: dict[str, Any], operations: list[dict[str, Any]])
                 }
             )
 
+    next_timeline["duration_ms"] = max(int(next_timeline.get("duration_ms", 0)), _timeline_end(next_timeline))
     return next_timeline
 
 

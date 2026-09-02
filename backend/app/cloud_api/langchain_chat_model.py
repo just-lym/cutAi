@@ -120,7 +120,7 @@ def _messages_to_dashscope(messages: list[BaseMessage]) -> list[dict[str, Any]]:
 
 
 class ChatDashScope(BaseChatModel):
-    model_name: str = Field(default="qwen-max", alias="model")
+    model_name: str = Field(default="qwen3.8-max", alias="model")
     temperature: float = 0.2
     max_tokens: int | None = None
 

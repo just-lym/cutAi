@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Scissors, Trash2, Upload, Volume2 } from 'lucide-react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { History, RotateCcw, Scissors, Trash2, Upload, Volume2 } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type Asset, type Clip, type EditOperation, type Timeline } from '../api/client'
 import { useEditorStore } from '../stores/editor'
 
@@ -44,6 +44,11 @@ export function InspectorPanel({ projectId, timeline, assets }: Props) {
   const [positionY, setPositionY] = useState('0')
   const [scale, setScale] = useState('1')
   const [notice, setNotice] = useState('')
+  const versions = useQuery({
+    queryKey: ['timeline-versions', projectId],
+    queryFn: () => api.timeline.versions(projectId),
+    enabled: !!projectId
+  })
 
   useEffect(() => {
     const transform = selection?.clip.transform ?? {}
@@ -65,10 +70,24 @@ export function InspectorPanel({ projectId, timeline, assets }: Props) {
       setNotice(variables.summary)
       await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
       await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['timeline-versions', projectId] })
     },
     onError: (error) => {
       setNotice(error instanceof Error ? error.message : '操作失败')
     }
+  })
+
+  const restore = useMutation({
+    mutationFn: (version: number) => api.timeline.restore(projectId, version),
+    onSuccess: async (restored) => {
+      clearClipSelection()
+      setNotice(`已从历史版本恢复，并创建当前版本 v${restored.version}`)
+      await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['timeline-versions', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['subtitles', projectId] })
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : '恢复版本失败')
   })
 
   const insertSelectedAsset = () => {
@@ -227,6 +246,28 @@ export function InspectorPanel({ projectId, timeline, assets }: Props) {
         ) : (
           <p className="muted compact">点击底部时间线上的片段进行编辑。</p>
         )}
+      </section>
+
+      <section className="inspector-section version-section">
+        <div className="section-label"><History size={13} />版本历史</div>
+        <div className="version-list">
+          {(versions.data ?? []).slice(0, 8).map((item, index) => (
+            <div className="version-row" key={item.id}>
+              <span><b>v{item.version}</b><small>{item.change_summary ?? item.created_by}</small></span>
+              {index > 0 ? (
+                <button
+                  className="icon-button"
+                  onClick={() => restore.mutate(item.version)}
+                  disabled={restore.isPending}
+                  title={`恢复 v${item.version}`}
+                  aria-label={`恢复版本 ${item.version}`}
+                >
+                  <RotateCcw size={14} />
+                </button>
+              ) : <em>当前</em>}
+            </div>
+          ))}
+        </div>
       </section>
 
       {notice ? <p className={commit.isError ? 'error-text' : 'success-text'}>{notice}</p> : null}

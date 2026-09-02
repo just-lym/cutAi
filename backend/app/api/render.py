@@ -13,7 +13,9 @@ from app.config import settings
 from app.database import async_session, get_db
 from app.models import Asset, Job, JobStatus, JobType, Project
 from app.schemas import JobRead, RenderPathRequest, RenderPathResponse, RenderRequest
+from app.services.agent_memory import get_or_create_agent_session, record_agent_message
 from app.services.executor import get_latest_timeline
+from app.services.media_intelligence import evaluate_render_quality
 from app.tools.media_tools import (
     MediaToolError,
     apply_timeline_overlays,
@@ -30,6 +32,7 @@ from app.ws.events import manager
 router = APIRouter()
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 ACTIVE_RENDER_TASKS: dict[str, asyncio.Task[None]] = {}
+RENDER_SEMAPHORE = asyncio.Semaphore(max(1, settings.gpu_render_concurrency))
 
 
 def _utc_now() -> datetime:
@@ -47,6 +50,7 @@ def _asset_path(asset: Asset) -> Path:
 
 
 def _main_ranges(timeline: dict) -> list[dict]:
+    original_audio_clips = _track_clips(timeline, "audio-original")
     for track in timeline.get("tracks", []):
         if track.get("id") != "video-main":
             continue
@@ -57,6 +61,16 @@ def _main_ranges(timeline: dict) -> list[dict]:
             source_in_ms = int(clip.get("source_in_ms") or 0)
             source_out_ms = int(clip.get("source_out_ms") or source_in_ms + timeline_end_ms - timeline_start_ms)
             if clip.get("asset_id") and source_out_ms > source_in_ms:
+                matching_audio = next(
+                    (
+                        audio_clip
+                        for audio_clip in original_audio_clips
+                        if str(audio_clip.get("asset_id")) == str(clip.get("asset_id"))
+                        and int(audio_clip.get("timeline_start_ms") or 0) == timeline_start_ms
+                        and int(audio_clip.get("timeline_end_ms") or 0) == timeline_end_ms
+                    ),
+                    None,
+                )
                 ranges.append(
                     {
                         "asset_id": str(clip["asset_id"]),
@@ -64,6 +78,12 @@ def _main_ranges(timeline: dict) -> list[dict]:
                         "timeline_end_ms": timeline_end_ms,
                         "source_in_ms": source_in_ms,
                         "source_out_ms": source_out_ms,
+                        "speed": float(clip.get("speed") or 1.0),
+                        "volume": float(
+                            matching_audio.get("volume")
+                            if matching_audio and matching_audio.get("volume") is not None
+                            else clip.get("volume") if clip.get("volume") is not None else 1.0
+                        ),
                     }
                 )
         return ranges
@@ -279,6 +299,7 @@ async def _render_current_timeline(
         "audio_path": planned_paths["audio_path"],
         "subtitle_path": str(subtitle_path) if subtitle_path else None,
         "timeline_version": timeline.version,
+        "timeline_duration_ms": int(timeline.timeline_json.get("duration_ms") or 0),
         "width": width,
         "height": height,
         "frame_rate": frame_rate,
@@ -375,8 +396,57 @@ async def _run_render_job(
 ) -> None:
     cancel_key = str(job_id)
     try:
-        async with async_session() as db:
-            output = await _render_current_timeline(project_id, job_type, db, options, cancel_key, planned_paths)
+        if RENDER_SEMAPHORE.locked():
+            await manager.broadcast(
+                str(project_id),
+                "job_progress",
+                {"job_id": job_id, "progress": 0.05, "step": "queued"},
+            )
+        async with RENDER_SEMAPHORE, async_session() as db:
+            job = await db.get(Job, job_id)
+            if job is None or job.status == JobStatus.CANCELLED:
+                ACTIVE_RENDER_TASKS.pop(cancel_key, None)
+                clear_media_job_cancel(cancel_key)
+                return
+            job.step = "rendering"
+            await db.commit()
+            await manager.broadcast(
+                str(project_id),
+                "job_progress",
+                {"job_id": job_id, "progress": 0.08, "step": "rendering"},
+            )
+            output = await _render_current_timeline(
+                project_id,
+                job_type,
+                db,
+                options,
+                cancel_key,
+                planned_paths,
+            )
+        await manager.broadcast(
+            str(project_id),
+            "job_progress",
+            {"job_id": job_id, "progress": 0.92, "step": "quality_review"},
+        )
+        try:
+            output["quality_report"] = await evaluate_render_quality(
+                Path(output["output_path"]),
+                settings.projects_root / str(project_id),
+                expected_duration_ms=int(output.get("timeline_duration_ms") or 0),
+            )
+        except Exception as quality_exc:  # noqa: BLE001 - a QA failure must not discard a valid render.
+            output["quality_report"] = {
+                "version": 1,
+                "passed": False,
+                "score": None,
+                "issues": [
+                    {
+                        "severity": "medium",
+                        "category": "inspection",
+                        "detail": f"{type(quality_exc).__name__}: {quality_exc}",
+                    }
+                ],
+            }
     except Exception as exc:  # noqa: BLE001 - render jobs should fail as jobs, not crash ASGI.
         async with async_session() as db:
             job = await db.get(Job, job_id)
@@ -392,6 +462,18 @@ async def _run_render_job(
             job.completed_at = _utc_now()
             if was_cancelled:
                 _cleanup_partial_render_files(job.output)
+            session = await get_or_create_agent_session(db, project_id)
+            record_agent_message(
+                db,
+                session,
+                "system",
+                f"渲染任务 {job.id} {'已取消' if was_cancelled else '失败'}：{job.error}",
+                {
+                    "event": "render_cancelled" if was_cancelled else "render_failed",
+                    "render_job_id": str(job.id),
+                    "render_status": job.status.value,
+                },
+            )
             await db.commit()
             await manager.broadcast(
                 str(project_id),
@@ -424,6 +506,25 @@ async def _run_render_job(
             "actual_seconds": max(0.0, (completed_at - started_at).total_seconds()),
         }
         job.completed_at = completed_at
+        quality_report = output.get("quality_report") or {}
+        session = await get_or_create_agent_session(db, project_id)
+        record_agent_message(
+            db,
+            session,
+            "system",
+            (
+                f"渲染任务 {job.id} 已完成，质量评分 {quality_report.get('score')}，"
+                f"{'通过' if quality_report.get('passed') else '需要复查'}。"
+            ),
+            {
+                "event": "render_quality_reviewed",
+                "render_job_id": str(job.id),
+                "render_status": "COMPLETED",
+                "timeline_version": output.get("timeline_version"),
+                "quality_report": quality_report,
+                "output_path": output.get("output_path"),
+            },
+        )
         await db.commit()
         await db.refresh(job)
         await manager.broadcast(

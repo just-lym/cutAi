@@ -3,7 +3,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from app.agents.base import toolbox, user_request
+from app.agents.base import compact_history, toolbox, user_request
+from app.agents.modes.evidence import collect_preflight_evidence as _collect_preflight_evidence
 from app.agents.modes.schema import AgentMode
 from app.agents.runtime import final_ai_json, message_tool_trace, message_usage_records
 from app.agents.state import AgentState
@@ -48,6 +49,9 @@ def _completion_is_valid(response: dict[str, Any], collector: DelegationCollecto
 
 async def run_mode_coordinator(state: AgentState, mode: AgentMode) -> AgentState:
     tools = toolbox(state)
+    request = user_request(state)
+    evidence, evidence_trace, evidence_usage = await _collect_preflight_evidence(state, tools, request)
+    state = {**state, "evidence": evidence}
     collector = DelegationCollector()
     coordinator_tools = [
         *[tools.get(tool_name) for tool_name in tools.names_for(mode.coordinator_name)],
@@ -59,13 +63,17 @@ async def run_mode_coordinator(state: AgentState, mode: AgentMode) -> AgentState
             mode.coordinator_name,
         ),
     ]
-    request = user_request(state)
     payload = {
         "user_request": request,
         "project_id": state.get("project_id"),
         "video_type": mode.video_type,
         "creative_mode": mode.label,
         "team": list(mode.team),
+        "selection": state.get("selection"),
+        "learned_preferences": state.get("preferences", {}),
+        "history": compact_history(state.get("history") or [], limit=12),
+        "evidence": evidence,
+        "base_timeline_version": state.get("timeline_version"),
         "available_tools": [agent_tool.name for agent_tool in coordinator_tools],
         "tool_policy": (
             "你是自主 ReAct 创作 Agent。根据项目证据自由决定直接回答、调用工具或委托专业 Agent；"
@@ -154,18 +162,21 @@ async def run_mode_coordinator(state: AgentState, mode: AgentMode) -> AgentState
     else:
         trace_title = f"{mode.label}导演 Agent(create_agent) 执行完成"
     return {
+        "evidence": evidence,
         "agent_outputs": outputs,
         "reply": detail,
         "awaiting_user": awaiting_clarification,
         "coordinator_name": mode.coordinator_name,
         "usage_records": [
             *state.get("usage_records", []),
+            *evidence_usage,
             *usage_records,
             *collector.usage_records,
         ],
         "route_history": [*state.get("route_history", []), mode.coordinator_name],
         "trace": [
             *state.get("trace", []),
+            *evidence_trace,
             *completion_trace,
             *collector.trace,
             {

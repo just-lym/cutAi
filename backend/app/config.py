@@ -24,13 +24,16 @@ class StorageConfig(BaseModel):
 class CloudConfig(BaseModel):
     dashscope_api_key: str = ""
     dashscope_workspace_id: str = ""
-    agent_model: str = "qwen-plus"
+    agent_model: str = "qwen3.8-max"
     director_model: str = Field(
-        default="qwen-max",
+        default="qwen3.8-max",
         validation_alias=AliasChoices("director_model", "main_agent_model"),
     )
-    specialist_model: str = "qwen-plus"
-    review_model: str = "qwen-max"
+    specialist_model: str = "qwen3.8-max"
+    review_model: str = "qwen3.8-max"
+    vision_model: str = "qwen3-vl-plus"
+    audio_model: str = "qwen3-omni-flash"
+    asr_model: str = "qwen-audio-3.0-asr-flash-streaming"
     video_gen_provider: str = "dashscope"
     runway_api_key: str = ""
     pika_api_key: str = ""

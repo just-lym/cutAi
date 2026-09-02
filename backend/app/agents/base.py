@@ -22,6 +22,50 @@ def user_request(state: AgentState) -> str:
     return ""
 
 
+def compact_history(
+    history: list[dict[str, Any]],
+    limit: int = 20,
+    character_budget: int = 6000,
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    remaining = max(500, character_budget)
+    for item in reversed(history[-max(1, limit) :]):
+        content = " ".join(str(item.get("content") or "").split())
+        if not content:
+            continue
+        content = content[: min(800, remaining)]
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        compact_metadata = {
+            key: metadata[key]
+            for key in (
+                "event",
+                "plan_id",
+                "operation_types",
+                "timeline_version",
+                "render_status",
+            )
+            if key in metadata
+        }
+        quality_report = metadata.get("quality_report")
+        if isinstance(quality_report, dict):
+            compact_metadata["quality_report"] = {
+                "score": quality_report.get("score"),
+                "passed": quality_report.get("passed"),
+                "issues": list(quality_report.get("issues") or [])[:5],
+            }
+        compact.append(
+            {
+                "role": str(item.get("role") or "system"),
+                "content": content,
+                "metadata": compact_metadata,
+            }
+        )
+        remaining -= len(content)
+        if remaining <= 0:
+            break
+    return list(reversed(compact))
+
+
 def trace(
     state: AgentState,
     title: str,
@@ -38,6 +82,8 @@ def toolbox(state: AgentState) -> AgentToolbox:
         timeline_version=state.get("timeline_version"),
         timeline=state.get("timeline", {}),
         assets=state.get("assets", []),
+        preferences=state.get("preferences", {}),
+        selection=state.get("selection"),
     )
 
 
@@ -136,3 +182,96 @@ def valid_operations(
         conflicts.extend(kept_errors)
         return [], conflicts
     return kept, [*combined_errors, *conflicts]
+
+
+def _operation_scope(
+    operation: dict[str, Any], timeline: dict[str, Any]
+) -> tuple[int, int] | None:
+    op_type = str(operation.get("type") or "")
+    if "start_ms" in operation:
+        start_ms = int(operation.get("start_ms") or 0)
+        if "end_ms" in operation:
+            end_ms = int(operation.get("end_ms") or -1)
+            return start_ms, end_ms if end_ms >= 0 else int(timeline.get("duration_ms") or start_ms)
+        if "duration_ms" in operation:
+            return start_ms, start_ms + int(operation.get("duration_ms") or 0)
+        return start_ms, start_ms
+    if "position_ms" in operation:
+        start_ms = int(operation.get("position_ms") or 0)
+        return start_ms, start_ms + int(operation.get("duration_ms") or 0)
+    if "at_ms" in operation:
+        at_ms = int(operation.get("at_ms") or 0)
+        return at_ms, at_ms
+
+    clips = {
+        str(clip.get("id")): clip
+        for track in timeline.get("tracks", [])
+        for clip in track.get("clips") or []
+        if clip.get("id")
+    }
+    clip_ids = [
+        str(operation[key])
+        for key in ("clip_id", "from_clip_id", "to_clip_id")
+        if operation.get(key)
+    ]
+    clip_ranges = [
+        (
+            int(clips[clip_id].get("timeline_start_ms") or 0),
+            int(clips[clip_id].get("timeline_end_ms") or 0),
+        )
+        for clip_id in clip_ids
+        if clip_id in clips
+    ]
+    if op_type in {"MOVE_CLIP", "DUPLICATE_CLIP"} and clip_ranges:
+        duration_ms = clip_ranges[0][1] - clip_ranges[0][0]
+        start_ms = int(operation.get("timeline_start_ms") or 0)
+        return start_ms, start_ms + duration_ms
+    if clip_ranges:
+        return min(item[0] for item in clip_ranges), max(item[1] for item in clip_ranges)
+
+    cue_id = str(operation.get("cue_id") or "")
+    for track in timeline.get("tracks", []):
+        for cue in track.get("cues") or []:
+            if str(cue.get("id")) == cue_id:
+                return int(cue.get("start_ms") or 0), int(cue.get("end_ms") or 0)
+    marker_id = str(operation.get("marker_id") or "")
+    for marker in timeline.get("markers", []):
+        if str(marker.get("id")) == marker_id:
+            at_ms = int(marker.get("at_ms") or 0)
+            return at_ms, at_ms
+    return None
+
+
+def constrain_operations_to_selection(
+    operations: list[dict[str, Any]],
+    timeline: dict[str, Any],
+    selection: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not selection:
+        return operations, []
+    selection_start = int(selection.get("start_ms") or 0)
+    selection_end = int(selection.get("end_ms") or 0)
+    selected_clip_ids = {str(item) for item in selection.get("clip_ids") or []}
+    kept: list[dict[str, Any]] = []
+    conflicts: list[str] = []
+    for index, operation in enumerate(operations):
+        target_clip_ids = {
+            str(operation[key])
+            for key in ("clip_id", "from_clip_id", "to_clip_id")
+            if operation.get(key)
+        }
+        if target_clip_ids and selected_clip_ids and target_clip_ids.issubset(selected_clip_ids):
+            kept.append(operation)
+            continue
+        scope = _operation_scope(operation, timeline)
+        if scope is None:
+            conflicts.append(f"operation[{index}] 无法证明位于用户框选范围内，已拦截")
+            continue
+        if selection_start <= scope[0] and scope[1] <= selection_end:
+            kept.append(operation)
+            continue
+        conflicts.append(
+            f"operation[{index}] {operation.get('type')} 范围 {scope[0]}-{scope[1]}ms "
+            f"超出用户框选 {selection_start}-{selection_end}ms，已拦截"
+        )
+    return kept, conflicts

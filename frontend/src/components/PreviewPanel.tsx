@@ -1,6 +1,6 @@
 import { CSSProperties, useEffect, useMemo, useRef } from 'react'
 import { Pause, Play, RotateCcw, RotateCw } from 'lucide-react'
-import { api, type Asset, type Timeline } from '../api/client'
+import { api, type Asset, type Clip, type Timeline } from '../api/client'
 import { useEditorStore } from '../stores/editor'
 
 function formatMs(value: number) {
@@ -10,10 +10,53 @@ function formatMs(value: number) {
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 }
 
-function findMainVideoAsset(timeline: Timeline | undefined, assets: Asset[]) {
+function findActiveMainClip(timeline: Timeline | undefined, playheadMs: number) {
   const mainTrack = timeline?.tracks.find((track) => track.id === 'video-main')
-  const assetId = mainTrack?.clips?.[0]?.asset_id
-  return assets.find((asset) => asset.id === assetId) ?? assets.find((asset) => asset.type === 'VIDEO')
+  return (mainTrack?.clips ?? [])
+    .slice()
+    .sort((left, right) => (left.timeline_start_ms ?? 0) - (right.timeline_start_ms ?? 0))
+    .find((clip) => (clip.timeline_start_ms ?? 0) <= playheadMs && (clip.timeline_end_ms ?? 0) > playheadMs)
+}
+
+function findActiveTrackClips(timeline: Timeline | undefined, trackId: string, playheadMs: number) {
+  const track = timeline?.tracks.find((item) => item.id === trackId)
+  return (track?.clips ?? []).filter(
+    (clip) => (clip.timeline_start_ms ?? 0) <= playheadMs && (clip.timeline_end_ms ?? 0) > playheadMs
+  )
+}
+
+function TimelineAudio({
+  asset,
+  clip,
+  playhead,
+  isPlaying
+}: {
+  asset: Asset
+  clip: Clip
+  playhead: number
+  isPlaying: boolean
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const speed = Math.max(0.1, Number(clip.speed ?? 1))
+  const sourceTimeMs = Number(clip.source_in_ms ?? 0) + (playhead - Number(clip.timeline_start_ms ?? 0)) * speed
+  const src = asset.proxy_path ? api.assets.proxyUrl(asset.id) : api.assets.fileUrl(asset.id)
+
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.playbackRate = speed
+    audio.volume = Math.max(0, Math.min(1, Number(clip.volume ?? 1)))
+    if (Math.abs(audio.currentTime * 1000 - sourceTimeMs) > 250) {
+      audio.currentTime = sourceTimeMs / 1000
+    }
+    if (isPlaying) {
+      void audio.play().catch(() => undefined)
+    } else {
+      audio.pause()
+    }
+  }, [clip.volume, isPlaying, sourceTimeMs, speed])
+
+  return <audio ref={audioRef} src={src} preload="metadata" />
 }
 
 function isMostlyLatin(text: string) {
@@ -64,16 +107,35 @@ export function PreviewPanel({
     .filter((clip) => (clip.timeline_start_ms ?? 0) <= playhead && (clip.timeline_end_ms ?? 0) > playhead)
     .map((clip) => ({ clip, asset: assets.find((item) => item.id === clip.asset_id) }))
     .filter((item) => item.asset)
-  const asset = useMemo(() => findMainVideoAsset(timeline, assets), [assets, timeline])
+  const activeClip = useMemo(() => findActiveMainClip(timeline, playhead), [playhead, timeline])
+  const originalAudioClips = useMemo(
+    () => findActiveTrackClips(timeline, 'audio-original', playhead),
+    [playhead, timeline]
+  )
+  const musicClips = useMemo(
+    () => findActiveTrackClips(timeline, 'audio-music', playhead),
+    [playhead, timeline]
+  )
+  const asset = useMemo(
+    () => assets.find((item) => item.id === activeClip?.asset_id),
+    [activeClip?.asset_id, assets]
+  )
   const videoSrc = asset ? (asset.proxy_path ? api.assets.proxyUrl(asset.id) : api.assets.fileUrl(asset.id)) : null
+  const clipSpeed = Math.max(0.1, Number(activeClip?.speed ?? 1))
+  const matchingOriginalAudio = originalAudioClips.find((clip) => clip.asset_id === activeClip?.asset_id)
+  const sourceTimeMs = activeClip
+    ? Number(activeClip.source_in_ms ?? 0) + (playhead - Number(activeClip.timeline_start_ms ?? 0)) * clipSpeed
+    : 0
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video) return
-    if (Math.abs(video.currentTime * 1000 - playhead) > 500) {
-      video.currentTime = playhead / 1000
+    if (!video || !activeClip) return
+    video.playbackRate = clipSpeed
+    video.volume = Math.max(0, Math.min(1, Number(matchingOriginalAudio?.volume ?? activeClip.volume ?? 1)))
+    if (Math.abs(video.currentTime * 1000 - sourceTimeMs) > 250) {
+      video.currentTime = sourceTimeMs / 1000
     }
-  }, [playhead, videoSrc])
+  }, [activeClip, clipSpeed, matchingOriginalAudio?.volume, sourceTimeMs, videoSrc])
 
   useEffect(() => {
     const video = videoRef.current
@@ -92,20 +154,37 @@ export function PreviewPanel({
           {videoSrc ? (
             <video
               ref={videoRef}
-              key={videoSrc}
+              key={`${videoSrc}-${activeClip?.id ?? ''}`}
               className="preview-video"
               src={videoSrc}
-              controls
               preload="metadata"
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
-              onTimeUpdate={(event) => setPlayhead(Math.round(event.currentTarget.currentTime * 1000))}
-              onLoadedMetadata={(event) => setPlayhead(Math.round(event.currentTarget.currentTime * 1000))}
+              onTimeUpdate={(event) => {
+                if (!activeClip) return
+                const sourcePositionMs = event.currentTarget.currentTime * 1000
+                const sourceOutMs = Number(activeClip.source_out_ms ?? Number.POSITIVE_INFINITY)
+                if (sourcePositionMs >= sourceOutMs - 20) {
+                  setPlayhead(Number(activeClip.timeline_end_ms ?? playhead))
+                  return
+                }
+                const nextPlayhead = Number(activeClip.timeline_start_ms ?? 0)
+                  + (sourcePositionMs - Number(activeClip.source_in_ms ?? 0)) / clipSpeed
+                setPlayhead(Math.min(Number(activeClip.timeline_end_ms ?? nextPlayhead), Math.round(nextPlayhead)))
+              }}
+              onLoadedMetadata={(event) => {
+                event.currentTarget.currentTime = sourceTimeMs / 1000
+                event.currentTarget.playbackRate = clipSpeed
+              }}
             />
           ) : (
             <>
               <strong>AICut Preview</strong>
-              <span>{timeline ? `${timeline.width}x${timeline.height} · ${timeline.frame_rate}fps` : 'Loading'}</span>
+              <span>
+                {timeline
+                  ? `当前时间点没有主视频片段 · ${timeline.width}x${timeline.height}`
+                  : 'Loading'}
+              </span>
             </>
           )}
           {activeCues.length ? (
@@ -139,6 +218,20 @@ export function PreviewPanel({
                 style={overlayStyle(clip.transform)}
               />
             )
+          })}
+          {originalAudioClips
+            .filter((clip) => clip.asset_id !== activeClip?.asset_id)
+            .map((clip) => {
+              const audioAsset = assets.find((item) => item.id === clip.asset_id)
+              return audioAsset ? (
+                <TimelineAudio key={clip.id} asset={audioAsset} clip={clip} playhead={playhead} isPlaying={isPlaying} />
+              ) : null
+            })}
+          {musicClips.map((clip) => {
+            const audioAsset = assets.find((item) => item.id === clip.asset_id)
+            return audioAsset ? (
+              <TimelineAudio key={clip.id} asset={audioAsset} clip={clip} playhead={playhead} isPlaying={isPlaying} />
+            ) : null
           })}
           {asset?.processing_status === 'FAILED' ? (
             <p className="preview-warning">素材处理失败，请先点击左侧重处理按钮生成可播放代理。</p>

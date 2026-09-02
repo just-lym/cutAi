@@ -1,7 +1,7 @@
-import { FormEvent, useRef, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Bot, Check, ChevronDown, CircleDot, CircleHelp, Loader2, RotateCcw, Send, Sparkles, X } from 'lucide-react'
-import { api, type AgentTraceStep, type EditPlan } from '../api/client'
+import { FormEvent, useEffect, useRef, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AudioLines, Ban, Bot, Check, ChevronDown, CircleDot, CircleHelp, History, Loader2, ScanSearch, RotateCcw, Send, Sparkles, Video, WandSparkles, X } from 'lucide-react'
+import { api, type AgentTraceStep, type Asset, type EditPlan, type Timeline } from '../api/client'
 import { getVideoMode, VIDEO_MODE_OPTIONS, type VideoType } from '../constants/videoModes'
 import { useEditorStore } from '../stores/editor'
 
@@ -17,10 +17,19 @@ function operationTitle(operation: Record<string, unknown>) {
   if (type === 'DELETE_CLIP') return '删除片段'
   if (type === 'UPDATE_CLIP_TRANSFORM') return '调整画面'
   if (type === 'APPLY_CLIP_EFFECT') return '添加效果'
+  if (type === 'TRIM_CLIP') return '裁切片段'
+  if (type === 'MOVE_CLIP') return '移动片段'
+  if (type === 'SET_CLIP_SPEED') return '调整速度'
+  if (type === 'SET_CLIP_VOLUME') return '调整片段音量'
+  if (type === 'DUPLICATE_CLIP') return '复制片段'
+  if (type === 'ADD_TRANSITION') return '添加转场'
+  if (type === 'REMOVE_EFFECT') return '移除效果'
   if (type === 'UPDATE_SUBTITLE') return '修正字幕'
   if (type === 'CREATE_SUBTITLE') return '新增字幕'
   if (type === 'DELETE_SUBTITLE') return '删除字幕'
   if (type === 'ADD_MARKER') return '添加标记'
+  if (type === 'UPDATE_SUBTITLE_STYLE') return '调整字幕样式'
+  if (type === 'REMOVE_MARKER') return '移除标记'
   if (type === 'INSERT_BROLL_OVERLAY') return '插入 B-roll'
   return String(type)
 }
@@ -29,7 +38,28 @@ function hasSubtitleOperation(plan: EditPlan) {
   return plan.operations.some((operation) => ['UPDATE_SUBTITLE', 'CREATE_SUBTITLE'].includes(operation.type))
 }
 
-export function AgentPanel({ projectId, videoType }: { projectId: string; videoType: VideoType }) {
+function formatTime(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
+
+function formatRange(range: { start_ms: number; end_ms: number }) {
+  return `${formatTime(range.start_ms)} - ${formatTime(range.end_ms)}`
+}
+
+export function AgentPanel({
+  projectId,
+  videoType,
+  assets,
+  timeline
+}: {
+  projectId: string
+  videoType: VideoType
+  assets: Asset[]
+  timeline: Timeline | undefined
+}) {
   const [input, setInput] = useState('')
   const [reply, setReply] = useState('')
   const [trace, setTrace] = useState<AgentTraceStep[]>([])
@@ -42,10 +72,62 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
   const [lastAppliedPlanId, setLastAppliedPlanId] = useState<string | null>(null)
   const [lastRenderedFiles, setLastRenderedFiles] = useState<string[]>([])
   const [awaitingClarification, setAwaitingClarification] = useState(false)
+  const [renderAfterApply, setRenderAfterApply] = useState(true)
+  const [lastRenderJob, setLastRenderJob] = useState<{ id: string; status: string } | null>(null)
   const processRef = useRef<HTMLDetailsElement>(null)
   const queryClient = useQueryClient()
   const setBottomTab = useEditorStore((state) => state.setBottomTab)
+  const selection = useEditorStore((state) => state.highlightRange)
+  const selectedAssetId = useEditorStore((state) => state.selectedAssetId)
+  const selectedClipIds = useEditorStore((state) => state.selectedClipIds)
+  const playheadMs = useEditorStore((state) => state.playheadMs)
+  const setSelection = useEditorStore((state) => state.setHighlightRange)
+  const selectAsset = useEditorStore((state) => state.selectAsset)
   const currentMode = getVideoMode(videoType)
+  const videoAssets = assets.filter((asset) => asset.type === 'VIDEO' && asset.processing_status === 'COMPLETED')
+  const selectedVideoAsset = videoAssets.find((asset) => asset.id === selectedAssetId)
+  const mainTrack = timeline?.tracks.find((track) => track.type === 'VIDEO_MAIN' || track.id === 'video-main')
+  const playheadClip = mainTrack?.clips?.find((clip) =>
+    Number(clip.timeline_start_ms ?? 0) <= playheadMs && Number(clip.timeline_end_ms ?? 0) > playheadMs
+  ) ?? mainTrack?.clips?.[0]
+  const timelineVideoAsset = videoAssets.find((asset) => asset.id === playheadClip?.asset_id)
+  const activeVideoAsset = selectedVideoAsset ?? timelineVideoAsset ?? videoAssets[0]
+
+  useEffect(() => {
+    if (!selectedAssetId && activeVideoAsset) selectAsset(activeVideoAsset.id)
+  }, [activeVideoAsset, selectAsset, selectedAssetId])
+  const history = useQuery({
+    queryKey: ['agent-history', projectId],
+    queryFn: () => api.agent.history(projectId),
+    enabled: !!projectId
+  })
+  const renderJob = useQuery({
+    queryKey: ['agent-render-job', lastRenderJob?.id],
+    queryFn: () => api.render.job(lastRenderJob?.id ?? ''),
+    enabled: Boolean(lastRenderJob?.id),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'RUNNING' || status === 'PENDING' ? 1500 : false
+    }
+  })
+  const renderQuality = renderJob.data?.output?.quality_report as Record<string, unknown> | undefined
+  const renderIssues = Array.isArray(renderQuality?.issues)
+    ? renderQuality.issues as Array<Record<string, unknown>>
+    : []
+
+  useEffect(() => {
+    const job = renderJob.data
+    if (!job || !lastRenderJob || job.status === lastRenderJob.status) return
+    setLastRenderJob({ id: job.id, status: job.status })
+    if (job.status === 'COMPLETED') {
+      const score = typeof renderQuality?.score === 'number' ? `${renderQuality.score} 分` : '未评分'
+      setNotice(`预览渲染完成，质量自评 ${score}，${renderQuality?.passed ? '已通过' : '建议复查'}。`)
+      void queryClient.invalidateQueries({ queryKey: ['agent-history', projectId] })
+    } else if (job.status === 'FAILED' || job.status === 'CANCELLED') {
+      setSendError(job.error || `预览任务${job.status === 'FAILED' ? '失败' : '已取消'}`)
+      void queryClient.invalidateQueries({ queryKey: ['agent-history', projectId] })
+    }
+  }, [lastRenderJob, projectId, queryClient, renderJob.data, renderQuality])
 
   const changeMode = useMutation({
     mutationFn: (nextVideoType: VideoType) => api.projects.update(projectId, { video_type: nextVideoType }),
@@ -75,7 +157,7 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
       const rejected_indices = plan.operations
         .map((_, index) => index)
         .filter((index) => decisions[index] === 'rejected')
-      return api.agent.approve(plan.id, { approved_indices, rejected_indices })
+      return api.agent.approve(plan.id, { approved_indices, rejected_indices, render_after_apply: renderAfterApply })
     },
     onMutate: () => {
       setSendError('')
@@ -83,12 +165,12 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
     },
     onSuccess: async (response) => {
       const files = plan?.rendered_files ?? []
-      setNotice(
-        files.length
-          ? `已应用 ${response.applied_count} 条到时间线，拒绝 ${response.rejected_count} 条；FFmpeg 已生成 ${files.length} 个视频文件。`
-          : `已应用 ${response.applied_count} 条到时间线，拒绝 ${response.rejected_count} 条；这一步不会重新合成视频。`
-      )
+      const renderText = response.render_job_id
+        ? `预览任务 ${response.render_status ?? 'RUNNING'}`
+        : renderAfterApply ? `预览任务未创建：${response.render_status ?? '未知原因'}` : '未启动预览渲染'
+      setNotice(`已应用 ${response.applied_count} 条到时间线，拒绝 ${response.rejected_count} 条；${renderText}。`)
       setLastRenderedFiles(files)
+      setLastRenderJob(response.render_job_id ? { id: response.render_job_id, status: response.render_status ?? 'RUNNING' } : null)
       setLastAppliedPlanId(plan?.id ?? null)
       if (plan && hasSubtitleOperation(plan)) {
         setBottomTab('script')
@@ -96,11 +178,26 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
       setPlan(null)
       await queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
       await queryClient.invalidateQueries({ queryKey: ['subtitles', projectId] })
+      await queryClient.invalidateQueries({ queryKey: ['agent-history', projectId] })
     },
     onError: (error) => {
       const message = error instanceof Error ? error.message : '应用失败'
       setSendError(message)
     }
+  })
+
+  const reject = useMutation({
+    mutationFn: () => {
+      if (!plan) throw new Error('No plan')
+      return api.agent.reject(plan.id)
+    },
+    onSuccess: async () => {
+      setNotice('已拒绝整份计划，时间线未修改；本次选择已用于更新偏好。')
+      setPlan(null)
+      setDecisions({})
+      await queryClient.invalidateQueries({ queryKey: ['agent-history', projectId] })
+    },
+    onError: (error) => setSendError(error instanceof Error ? error.message : '拒绝计划失败')
   })
 
   const undo = useMutation({
@@ -120,8 +217,12 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
     }
   })
 
-  const submitAgentMessage = async () => {
-    const content = input.trim()
+  const submitAgentMessage = async (
+    requestedContent?: string,
+    requestedSelection?: { start_ms: number; end_ms: number },
+    requestedAssetId?: string
+  ) => {
+    const content = typeof requestedContent === 'string' ? requestedContent.trim() : input.trim()
     if (!content || isSending) return
     setNotice('')
     setSendError('')
@@ -152,6 +253,7 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
     ])
     let receivedPlan = false
     let receivedPreview = false
+    const activeSelection = requestedSelection ?? selection
     try {
       await api.agent.stream(projectId, content, {
         onThinking: (event) => {
@@ -225,6 +327,7 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
           }
           setStatusMessage('')
           setIsSending(false)
+          void queryClient.invalidateQueries({ queryKey: ['agent-history', projectId] })
         },
         onError: (message) => {
           setStatusMessage('')
@@ -237,7 +340,11 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
             }
           ])
         }
-      })
+      }, activeSelection ? {
+        ...activeSelection,
+        asset_id: requestedAssetId ?? selectedAssetId ?? undefined,
+        clip_ids: selectedClipIds.length ? selectedClipIds : undefined
+      } : undefined)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Agent 请求失败'
       setStatusMessage('')
@@ -257,6 +364,37 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
   const onSubmit = (event: FormEvent) => {
     event.preventDefault()
     submitAgentMessage()
+  }
+
+  const analysisRange = () => {
+    if (selection) return selection
+    const duration = Math.max(1, activeVideoAsset?.duration_ms ?? timeline?.duration_ms ?? 0)
+    const boundedPlayhead = Math.min(Math.max(0, playheadMs), duration)
+    const startMs = boundedPlayhead >= duration ? Math.max(0, duration - 30000) : boundedPlayhead
+    return {
+      start_ms: startMs,
+      end_ms: Math.min(duration, Math.max(startMs + 1000, startMs + 30000))
+    }
+  }
+
+  const runRangeAnalysis = (request: string) => {
+    const range = analysisRange()
+    setSelection(range)
+    void submitAgentMessage(request, range, activeVideoAsset?.id)
+  }
+
+  const runSmartRoughCut = () => {
+    if (!activeVideoAsset?.duration_ms) {
+      setSendError('没有可用于智能粗剪的已完成视频素材。')
+      return
+    }
+    const range = selection ?? { start_ms: 0, end_ms: activeVideoAsset.duration_ms }
+    setSelection(range)
+    void submitAgentMessage(
+      `对素材 ${activeVideoAsset.original_name} 的 ${formatRange(range)} 范围，基于真实画面、音频、转写和当前偏好，生成可审批的智能粗剪计划。`,
+      range,
+      activeVideoAsset.id
+    )
   }
 
   return (
@@ -280,6 +418,63 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
           </button>
         ))}
       </div>
+      <div className="agent-source-control">
+        <label htmlFor="agent-source-select"><Video size={14} />分析素材</label>
+        <select
+          id="agent-source-select"
+          value={activeVideoAsset?.id ?? ''}
+          onChange={(event) => {
+            selectAsset(event.target.value || null)
+            setSelection(null)
+          }}
+          disabled={isSending || !videoAssets.length}
+        >
+          {!videoAssets.length ? <option value="">没有可用视频</option> : null}
+          {videoAssets.map((asset) => (
+            <option value={asset.id} key={asset.id}>
+              {asset.original_name} · {formatTime(asset.duration_ms ?? 0)}
+            </option>
+          ))}
+        </select>
+        <div className="agent-source-range">
+          <span>分析范围</span>
+          <b>{selection ? formatRange(selection) : `全片 00:00 - ${formatTime(activeVideoAsset?.duration_ms ?? 0)}`}</b>
+        </div>
+      </div>
+      <div className="agent-quick-actions" aria-label="智能操作">
+        <button
+          type="button"
+          onClick={runSmartRoughCut}
+          disabled={isSending || !activeVideoAsset}
+          title={activeVideoAsset ? `粗剪 ${activeVideoAsset.original_name}` : '没有可用视频'}
+        >
+          <WandSparkles size={14} />智能粗剪
+        </button>
+        <button
+          type="button"
+          onClick={() => runRangeAnalysis('检查指定范围的真实画面、构图、连续性和关键剪点，只分析不修改。')}
+          disabled={isSending}
+          title={selection ? '检查当前框选范围' : '未框选时检查播放位置后最多 30 秒'}
+        >
+          <ScanSearch size={14} />画面检查
+        </button>
+        <button
+          type="button"
+          onClick={() => runRangeAnalysis('听取指定范围的语音、音乐、噪声和节拍，推荐安全剪点，只分析不修改。')}
+          disabled={isSending}
+          title={selection ? '分析当前框选范围' : '未框选时分析播放位置后最多 30 秒'}
+        >
+          <AudioLines size={14} />音频分析
+        </button>
+        <button
+          type="button"
+          onClick={() => runRangeAnalysis('综合分析指定范围，给出画面、声音、语义和节奏的剪辑建议，只分析不修改。')}
+          disabled={isSending}
+          title={selection ? '分析当前框选范围' : '未框选时分析播放位置后最多 30 秒'}
+        >
+          <Sparkles size={14} />框选建议
+        </button>
+      </div>
       <div className="agent-log">
         {isSending ? (
           <div className="agent-status">
@@ -300,6 +495,21 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
           </section>
         ) : null}
         {notice ? <p className="success-text">{notice}</p> : null}
+        {lastRenderJob ? (
+          <div className="agent-render-status">
+            <div>
+              <span>预览任务 {lastRenderJob.id.slice(0, 8)}</span>
+              <b>{renderJob.data?.status ?? lastRenderJob.status}</b>
+            </div>
+            <progress value={renderJob.data?.progress ?? 0} max={1} />
+            {renderQuality ? (
+              <p className={renderQuality.passed ? 'success-text' : 'pending-text'}>
+                质量自评：{typeof renderQuality.score === 'number' ? `${renderQuality.score} 分` : '未评分'}
+                {renderIssues[0]?.detail ? ` · ${String(renderIssues[0].detail)}` : ''}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         {lastRenderedFiles.length ? (
           <div className="rendered-files compact-files">
             {lastRenderedFiles.map((file) => (
@@ -314,6 +524,19 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
           </button>
         ) : null}
         {sendError ? <p className="error-text">{sendError}</p> : null}
+        {history.data?.length ? (
+          <details className="agent-history">
+            <summary><History size={14} />会话历史 <span>{history.data.length}</span></summary>
+            <div>
+              {history.data.slice(-12).map((item) => (
+                <article key={item.id} className={`history-${item.role}`}>
+                  <b>{item.role === 'user' ? '你' : item.role === 'assistant' ? 'Agent' : '系统'}</b>
+                  <p>{item.content}</p>
+                </article>
+              ))}
+            </div>
+          </details>
+        ) : null}
       </div>
       {trace.length ? (
         <details className="agent-process" ref={processRef}>
@@ -356,8 +579,18 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
               应用到时间线
             </button>
           </div>
+          <div className="plan-controls">
+            <label>
+              <input type="checkbox" checked={renderAfterApply} onChange={(event) => setRenderAfterApply(event.target.checked)} />
+              应用后渲染预览
+            </label>
+            <button className="danger-ghost-button" onClick={() => reject.mutate()} disabled={reject.isPending || approve.isPending}>
+              {reject.isPending ? <Loader2 className="spin" size={14} /> : <Ban size={14} />}
+              整单拒绝
+            </button>
+          </div>
           <p className="pending-text">
-            点击应用会创建新的时间线版本，并让预览/字幕轨刷新；FFmpeg 文件如果已生成，会在下方显示路径。
+            点击应用会创建新的时间线版本；开启渲染时会立即启动后台预览任务。
           </p>
           <p className="plan-summary">{plan.summary}</p>
           {plan.rendered_files?.length ? (
@@ -398,12 +631,20 @@ export function AgentPanel({ projectId, videoType }: { projectId: string; videoT
       ) : null}
       {!isSending ? (
         <form className="agent-input" onSubmit={onSubmit}>
+          {selection ? (
+            <div className="agent-selection-context">
+              <span>{activeVideoAsset?.original_name ?? '当前素材'} · {formatRange(selection)}</span>
+              <button type="button" onClick={() => setSelection(null)} title="清除时间段选择" aria-label="清除时间段选择">
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
             placeholder="用自然语言告诉 Agent 想怎么剪"
           />
-          <button type="button" onClick={submitAgentMessage} disabled={!input.trim()}>
+          <button type="button" onClick={() => void submitAgentMessage()} disabled={!input.trim()}>
             <Send size={17} />
           </button>
         </form>

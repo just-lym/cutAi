@@ -14,13 +14,29 @@ from app.agents.modes import get_agent_mode
 from app.cloud_api.cost_tracker import record_usage
 from app.config import settings
 from app.database import get_db
-from app.models import AgentSession, Asset, EditPlan, EditPlanStatus, Project, TimelineVersion
+from app.models import (
+    AgentMessageRecord,
+    AgentSession,
+    Asset,
+    EditPlan,
+    EditPlanStatus,
+    JobType,
+    Project,
+    TimelineVersion,
+)
 from app.schemas import (
+    AgentHistoryItem,
     AgentMessage,
     ApprovalRequest,
     ApprovalResponse,
 )
+from app.services.agent_memory import (
+    get_or_create_agent_session,
+    load_agent_history,
+    record_agent_message,
+)
 from app.services.executor import ExecutionError, execute_edit_plan, get_latest_timeline
+from app.services.preferences import get_preference_profile, learn_from_approval
 from app.ws.events import manager
 
 router = APIRouter()
@@ -40,21 +56,6 @@ class AgentRunResult:
 
 def _sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-
-
-async def _get_or_create_session(db: AsyncSession, project_id: UUID) -> AgentSession:
-    result = await db.execute(
-        select(AgentSession)
-        .where(AgentSession.project_id == project_id, AgentSession.status == "ACTIVE")
-        .order_by(AgentSession.updated_at.desc())
-        .limit(1)
-    )
-    session = result.scalar_one_or_none()
-    if session is None:
-        session = AgentSession(project_id=project_id)
-        db.add(session)
-        await db.flush()
-    return session
 
 
 def _timeline_summary(timeline: dict[str, Any]) -> dict[str, Any]:
@@ -84,6 +85,7 @@ def _asset_context(asset: Asset) -> dict[str, Any]:
         "processing_status": asset.processing_status.value
         if hasattr(asset.processing_status, "value")
         else str(asset.processing_status),
+        "metadata": asset.metadata_ or {},
     }
 
 
@@ -124,10 +126,11 @@ async def _record_agent_usage(
         usage = await record_usage(
             db,
             provider=str(usage_record.get("provider") or "dashscope"),
-            service=str(usage_record.get("model") or "qwen-plus"),
+            service=str(usage_record.get("model") or settings.cloud.agent_model),
             project_id=project_id,
             input_tokens=int(usage_record.get("input_tokens") or 0),
             output_tokens=int(usage_record.get("output_tokens") or 0),
+            audio_duration_ms=int(usage_record.get("audio_duration_ms") or 0),
             request_id=str(usage_record.get("request_id")) if usage_record.get("request_id") else None,
         )
         session.total_tokens_used += int(usage_record.get("input_tokens") or 0) + int(
@@ -176,6 +179,19 @@ async def _persist_agent_result(
         }
         should_await_user = True
 
+    record_agent_message(
+        db,
+        session,
+        "assistant",
+        reply,
+        {
+            "plan_id": edit_plan.get("id") if edit_plan else None,
+            "operation_count": len(operations),
+            "awaiting_user": should_await_user,
+            "rendered_files": rendered_files or [],
+        },
+    )
+
     await db.commit()
     return AgentRunResult(
         session_id=session.id,
@@ -222,10 +238,22 @@ async def stream_agent_message(
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     mode = get_agent_mode(project.video_type)
-    session = await _get_or_create_session(db, project_id)
+    session = await get_or_create_agent_session(db, project_id)
+    history = await load_agent_history(db, session.id)
+    record_agent_message(
+        db,
+        session,
+        "user",
+        payload.content,
+        {"selection": payload.selection.model_dump(mode="json") if payload.selection else None},
+    )
+    await db.commit()
     timeline = await get_latest_timeline(db, project_id)
     asset_result = await db.execute(select(Asset).where(Asset.project_id == project_id))
     assets = [_asset_context(asset) for asset in asset_result.scalars()]
+    project_video_type = project.video_type.value if hasattr(project.video_type, "value") else str(project.video_type)
+    preferences = await get_preference_profile(db, project.owner_id, project_video_type)
+    selection = payload.selection.model_dump(mode="json", exclude_none=True) if payload.selection else None
 
     async def event_stream():
         yield _sse(
@@ -263,6 +291,9 @@ async def stream_agent_message(
                         timeline=timeline.timeline_json,
                         assets=assets,
                         video_type=mode.video_type,
+                        preferences=preferences,
+                        selection=selection,
+                        history=history,
                     ):
                         final_state = dict(state)
                         trace_steps = list(final_state.get("trace") or [])
@@ -428,17 +459,64 @@ async def approve_plan(
 
     operations = list(plan.operations)
     if payload and payload.approved_indices is not None:
-        approved_indices = set(payload.approved_indices)
-        rejected_indices = set(payload.rejected_indices or [])
+        valid_indices = set(range(len(operations)))
+        approved_indices = set(payload.approved_indices) & valid_indices
+        rejected_indices = (set(payload.rejected_indices or []) & valid_indices) | (valid_indices - approved_indices)
         selected = [operation for index, operation in enumerate(operations) if index in approved_indices]
         rejected_count = len(rejected_indices)
-        plan.status = EditPlanStatus.PARTIALLY_APPROVED
+        plan.status = EditPlanStatus.PARTIALLY_APPROVED if rejected_indices else EditPlanStatus.APPROVED
     else:
         selected = operations
+        approved_indices = set(range(len(operations)))
+        rejected_indices = set()
         rejected_count = 0
         plan.status = EditPlanStatus.APPROVED
 
+    if not selected:
+        project = await db.get(Project, plan.project_id)
+        if project is not None:
+            await learn_from_approval(
+                db,
+                project,
+                plan,
+                approved_indices,
+                rejected_indices,
+                payload.feedback_note if payload else None,
+            )
+        plan.status = EditPlanStatus.REJECTED
+        latest = await get_latest_timeline(db, plan.project_id)
+        session = await get_or_create_agent_session(db, plan.project_id)
+        record_agent_message(
+            db,
+            session,
+            "system",
+            f"用户拒绝了剪辑计划 {plan.id} 的全部操作，未修改时间线。",
+            {
+                "event": "plan_rejected",
+                "plan_id": str(plan.id),
+                "rejected_count": rejected_count,
+                "feedback_note": payload.feedback_note if payload else None,
+            },
+        )
+        await db.commit()
+        return ApprovalResponse(
+            ok=True,
+            applied_count=0,
+            rejected_count=rejected_count,
+            plan_status=plan.status.value,
+            timeline_version=latest.version,
+        )
+
     try:
+        latest = await get_latest_timeline(db, plan.project_id)
+        if latest.version != plan.base_timeline_version:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Edit plan is based on timeline v{plan.base_timeline_version}, "
+                    f"but current timeline is v{latest.version}. Generate a new plan."
+                ),
+            )
         timeline = await execute_edit_plan(
             db,
             plan.project_id,
@@ -448,22 +526,76 @@ async def approve_plan(
         )
         plan.status = EditPlanStatus.APPLIED
         plan.approved_by = "local"
+        project = await db.get(Project, plan.project_id)
+        if project is not None:
+            await learn_from_approval(
+                db,
+                project,
+                plan,
+                approved_indices,
+                rejected_indices,
+                payload.feedback_note if payload else None,
+            )
         await db.commit()
         await manager.broadcast(
             str(plan.project_id),
             "timeline_updated",
             {"version": timeline.version, "timeline_version_id": timeline.id},
         )
+        render_job_id = None
+        render_status = "SKIPPED"
+        should_render = payload.render_after_apply if payload is not None else True
+        if should_render:
+            try:
+                from app.api.render import _create_render_job
+
+                render_job = await _create_render_job(
+                    plan.project_id,
+                    JobType.PREVIEW_RENDER,
+                    db,
+                    None,
+                )
+                render_job_id = render_job.id
+                render_status = render_job.status.value
+            except Exception as render_exc:  # noqa: BLE001 - timeline application remains valid.
+                await db.rollback()
+                render_status = f"FAILED: {type(render_exc).__name__}: {render_exc}"
+
+        session = await get_or_create_agent_session(db, plan.project_id)
+        record_agent_message(
+            db,
+            session,
+            "system",
+            f"用户批准并应用了剪辑计划 {plan.id}，时间线更新到 v{timeline.version}。",
+            {
+                "event": "plan_approved",
+                "plan_id": str(plan.id),
+                "operation_types": [str(operation.get("type")) for operation in selected],
+                "rejected_count": rejected_count,
+                "timeline_version": timeline.version,
+                "render_job_id": str(render_job_id) if render_job_id else None,
+                "render_status": render_status,
+            },
+        )
+        await db.commit()
         return ApprovalResponse(
             ok=True,
             applied_count=len(selected),
             rejected_count=rejected_count,
             plan_status=plan.status.value,
             timeline_version=timeline.version,
+            render_job_id=render_job_id,
+            render_status=render_status,
         )
+    except HTTPException:
+        await db.rollback()
+        raise
     except ExecutionError as exc:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Approval failed: {type(exc).__name__}: {exc}") from exc
 
 
 @router.post("/agent/runs/{plan_id}/reject")
@@ -471,7 +603,26 @@ async def reject_plan(plan_id: UUID, db: DbSession) -> dict:
     plan = await db.get(EditPlan, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="Edit plan not found")
+    if plan.status not in {EditPlanStatus.WAITING_USER, EditPlanStatus.PROPOSED}:
+        raise HTTPException(status_code=400, detail="Edit plan is not waiting for approval")
+    project = await db.get(Project, plan.project_id)
+    if project is not None:
+        await learn_from_approval(
+            db,
+            project,
+            plan,
+            set(),
+            set(range(len(plan.operations or []))),
+        )
     plan.status = EditPlanStatus.REJECTED
+    session = await get_or_create_agent_session(db, plan.project_id)
+    record_agent_message(
+        db,
+        session,
+        "system",
+        f"用户拒绝了剪辑计划 {plan.id}，未修改时间线。",
+        {"event": "plan_rejected", "plan_id": str(plan.id)},
+    )
     await db.commit()
     return {"ok": True}
 
@@ -534,4 +685,24 @@ async def undo_applied_plan(plan_id: UUID, db: DbSession) -> dict:
         "timeline_updated",
         {"version": restored.version, "timeline_version_id": restored.id},
     )
+    session = await get_or_create_agent_session(db, plan.project_id)
+    record_agent_message(
+        db,
+        session,
+        "system",
+        f"用户撤回了剪辑计划 {plan.id}，时间线恢复为新版本 v{restored.version}。",
+        {"event": "plan_undone", "plan_id": str(plan.id), "timeline_version": restored.version},
+    )
+    await db.commit()
     return {"ok": True, "timeline_version": restored.version, "plan_status": plan.status.value}
+
+
+@router.get("/projects/{project_id}/agent/history", response_model=list[AgentHistoryItem])
+async def agent_history(project_id: UUID, db: DbSession, limit: int = 50) -> list[AgentMessageRecord]:
+    result = await db.execute(
+        select(AgentMessageRecord)
+        .where(AgentMessageRecord.project_id == project_id)
+        .order_by(AgentMessageRecord.created_at.desc())
+        .limit(max(1, min(limit, 200)))
+    )
+    return list(reversed(list(result.scalars())))

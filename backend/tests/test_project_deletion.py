@@ -72,6 +72,7 @@ async def test_delete_project_removes_records_and_storage(
     assert db.rolled_back is False
     assert db.deleted_tables == [
         "cloud_api_usage",
+        "agent_messages",
         "agent_sessions",
         "edit_plans",
         "jobs",

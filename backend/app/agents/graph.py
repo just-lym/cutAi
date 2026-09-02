@@ -18,6 +18,9 @@ def build_initial_state(
     timeline: dict[str, Any],
     assets: list[dict[str, Any]],
     video_type: str,
+    preferences: dict[str, Any] | None = None,
+    selection: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> AgentState:
     mode = get_agent_mode(video_type)
     return {
@@ -30,6 +33,10 @@ def build_initial_state(
         "timeline_version": timeline_version,
         "timeline": timeline,
         "assets": assets,
+        "preferences": preferences or {"sample_count": 0, "confidence": 0.0},
+        "selection": selection,
+        "history": history or [],
+        "evidence": {},
         "edit_plans": None,
         "agent_outputs": {},
         "awaiting_user": False,
@@ -46,6 +53,9 @@ def build_initial_state(
                     "asset_count": len(assets),
                     "video_type": mode.video_type,
                     "team": list(mode.team),
+                    "selection": selection,
+                    "preference_confidence": (preferences or {}).get("confidence", 0.0),
+                    "history_count": len(history or []),
                 },
             }
         ],
@@ -85,6 +95,9 @@ async def stream_agent_graph(
     timeline: dict[str, Any],
     assets: list[dict[str, Any]],
     video_type: str,
+    preferences: dict[str, Any] | None = None,
+    selection: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ):
     initial_state = build_initial_state(
         content,
@@ -94,6 +107,9 @@ async def stream_agent_graph(
         timeline,
         assets,
         video_type,
+        preferences,
+        selection,
+        history,
     )
     graph = build_agentic_graph(video_type)
     async for state in graph.astream(initial_state, {"recursion_limit": 12}, stream_mode="values"):

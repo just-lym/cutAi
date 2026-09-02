@@ -16,6 +16,15 @@ SUPPORTED_OPERATIONS = {
     "ADD_MARKER",
     "FADE_IN",
     "FADE_OUT",
+    "TRIM_CLIP",
+    "MOVE_CLIP",
+    "SET_CLIP_SPEED",
+    "SET_CLIP_VOLUME",
+    "DUPLICATE_CLIP",
+    "ADD_TRANSITION",
+    "REMOVE_EFFECT",
+    "UPDATE_SUBTITLE_STYLE",
+    "REMOVE_MARKER",
 }
 
 
@@ -53,6 +62,11 @@ def validate_edit_plan(operations: list[dict[str, Any]], timeline: dict[str, Any
         str(track.get("id"))
         for track in timeline.get("tracks", [])
         if track.get("id")
+    }
+    known_marker_ids = {
+        str(marker.get("id"))
+        for marker in timeline.get("markers", [])
+        if marker.get("id")
     }
 
     for index, operation in enumerate(operations):
@@ -103,6 +117,41 @@ def validate_edit_plan(operations: list[dict[str, Any]], timeline: dict[str, Any
             if not clip_id or str(clip_id) not in known_clip_ids:
                 errors.append(f"operation[{index}] UPDATE_CLIP requires an existing clip_id")
 
+        if op_type == "TRIM_CLIP":
+            clip_id = operation.get("clip_id")
+            source_in_ms = _to_int(operation.get("source_in_ms"))
+            source_out_ms = _to_int(operation.get("source_out_ms"))
+            if not clip_id or str(clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] TRIM_CLIP requires an existing clip_id")
+            if source_in_ms < 0 or source_out_ms <= source_in_ms:
+                errors.append(f"operation[{index}] TRIM_CLIP requires source_in_ms < source_out_ms")
+
+        if op_type == "MOVE_CLIP":
+            clip_id = operation.get("clip_id")
+            if not clip_id or str(clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] MOVE_CLIP requires an existing clip_id")
+            if _to_int(operation.get("timeline_start_ms")) < 0:
+                errors.append(f"operation[{index}] MOVE_CLIP requires timeline_start_ms >= 0")
+
+        if op_type in {"SET_CLIP_SPEED", "SET_CLIP_VOLUME"}:
+            clip_id = operation.get("clip_id")
+            if not clip_id or str(clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] {op_type} requires an existing clip_id")
+            value_name = "speed" if op_type == "SET_CLIP_SPEED" else "volume"
+            value = _to_float(operation.get(value_name))
+            upper = 8 if value_name == "speed" else 2
+            if value <= 0 or value > upper:
+                errors.append(f"operation[{index}] {op_type} requires 0 < {value_name} <= {upper}")
+
+        if op_type == "DUPLICATE_CLIP":
+            clip_id = operation.get("clip_id")
+            if not clip_id or str(clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] DUPLICATE_CLIP requires an existing clip_id")
+            if _to_int(operation.get("timeline_start_ms")) < 0:
+                errors.append(f"operation[{index}] DUPLICATE_CLIP requires timeline_start_ms >= 0")
+            if operation.get("new_clip_id"):
+                known_clip_ids.add(str(operation["new_clip_id"]))
+
         if op_type == "DELETE_CLIP":
             clip_id = operation.get("clip_id")
             if not clip_id or str(clip_id) not in known_clip_ids:
@@ -126,6 +175,23 @@ def validate_edit_plan(operations: list[dict[str, Any]], timeline: dict[str, Any
             if not isinstance(effect, dict) or not effect.get("type"):
                 errors.append(f"operation[{index}] APPLY_CLIP_EFFECT requires effect.type")
 
+        if op_type == "REMOVE_EFFECT":
+            clip_id = operation.get("clip_id")
+            if not clip_id or str(clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] REMOVE_EFFECT requires an existing clip_id")
+            if not operation.get("effect_id"):
+                errors.append(f"operation[{index}] REMOVE_EFFECT requires effect_id")
+
+        if op_type == "ADD_TRANSITION":
+            from_clip_id = operation.get("from_clip_id")
+            to_clip_id = operation.get("to_clip_id")
+            if str(from_clip_id) not in known_clip_ids or str(to_clip_id) not in known_clip_ids:
+                errors.append(f"operation[{index}] ADD_TRANSITION requires existing from/to clips")
+            if from_clip_id == to_clip_id:
+                errors.append(f"operation[{index}] ADD_TRANSITION clips must differ")
+            if _to_int(operation.get("duration_ms")) <= 0:
+                errors.append(f"operation[{index}] ADD_TRANSITION requires duration_ms > 0")
+
         if op_type == "INSERT_BROLL_OVERLAY":
             if not operation.get("asset_id"):
                 errors.append(f"operation[{index}] INSERT_BROLL_OVERLAY requires asset_id")
@@ -138,6 +204,13 @@ def validate_edit_plan(operations: list[dict[str, Any]], timeline: dict[str, Any
                 errors.append(f"operation[{index}] UPDATE_SUBTITLE requires cue_id")
             elif str(cue_id) not in known_cue_ids:
                 errors.append(f"operation[{index}] UPDATE_SUBTITLE cue does not exist: {cue_id}")
+
+        if op_type == "UPDATE_SUBTITLE_STYLE":
+            cue_id = operation.get("cue_id")
+            if not cue_id or str(cue_id) not in known_cue_ids:
+                errors.append(f"operation[{index}] UPDATE_SUBTITLE_STYLE requires an existing cue_id")
+            if not isinstance(operation.get("style"), dict):
+                errors.append(f"operation[{index}] UPDATE_SUBTITLE_STYLE requires style object")
 
         if op_type == "CREATE_SUBTITLE":
             text = str(operation.get("text") or "").strip()
@@ -163,6 +236,15 @@ def validate_edit_plan(operations: list[dict[str, Any]], timeline: dict[str, Any
             at_ms = _to_int(operation.get("at_ms"))
             if at_ms < 0:
                 errors.append(f"operation[{index}] ADD_MARKER requires at_ms >= 0")
+            if operation.get("marker_id"):
+                known_marker_ids.add(str(operation["marker_id"]))
+
+        if op_type == "REMOVE_MARKER":
+            marker_id = operation.get("marker_id")
+            if not marker_id or str(marker_id) not in known_marker_ids:
+                errors.append(f"operation[{index}] REMOVE_MARKER requires an existing marker_id")
+            else:
+                known_marker_ids.discard(str(marker_id))
 
         if op_type in {"FADE_IN", "FADE_OUT"}:
             start_ms = _to_int(operation.get("start_ms"))

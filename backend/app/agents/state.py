@@ -23,3 +23,7 @@ class AgentState(TypedDict, total=False):
     reply: str
     usage_records: list[dict[str, Any]]
     delegated_task: str
+    preferences: dict[str, Any]
+    selection: dict[str, Any] | None
+    history: list[dict[str, Any]]
+    evidence: dict[str, Any]

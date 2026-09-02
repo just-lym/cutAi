@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import type { Timeline as TimelineType, TimelineTrack } from '../api/client'
 import { useEditorStore } from '../stores/editor'
 
@@ -18,7 +19,21 @@ function itemStyle(start: number, end: number, duration: number, color: string) 
   }
 }
 
-function Track({ track, duration }: { track: TimelineTrack; duration: number }) {
+function Track({
+  track,
+  duration,
+  selection,
+  onRangeStart,
+  onRangeMove,
+  onRangeEnd
+}: {
+  track: TimelineTrack
+  duration: number
+  selection: { start_ms: number; end_ms: number } | null
+  onRangeStart: (value: number) => void
+  onRangeMove: (value: number) => void
+  onRangeEnd: (value: number) => void
+}) {
   const color = COLORS[track.type] ?? '#64748b'
   const selectedClipIds = useEditorStore((state) => state.selectedClipIds)
   const selectClip = useEditorStore((state) => state.selectClip)
@@ -36,7 +51,31 @@ function Track({ track, duration }: { track: TimelineTrack; duration: number }) 
   return (
     <div className="timeline-track">
       <span className="track-label">{track.name}</span>
-      <div className="track-lane">
+      <div
+        className="track-lane"
+        onPointerDown={(event) => {
+          if (event.button !== 0) return
+          event.currentTarget.setPointerCapture(event.pointerId)
+          const rect = event.currentTarget.getBoundingClientRect()
+          onRangeStart(Math.round(duration * (event.clientX - rect.left) / rect.width))
+        }}
+        onPointerMove={(event) => {
+          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+          const rect = event.currentTarget.getBoundingClientRect()
+          onRangeMove(Math.round(duration * (event.clientX - rect.left) / rect.width))
+        }}
+        onPointerUp={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          onRangeEnd(Math.round(duration * (event.clientX - rect.left) / rect.width))
+          event.currentTarget.releasePointerCapture(event.pointerId)
+        }}
+      >
+        {selection ? (
+          <span
+            className="timeline-selection"
+            style={itemStyle(selection.start_ms, selection.end_ms, duration, 'rgba(34, 211, 238, 0.2)')}
+          />
+        ) : null}
         {items.map((item) => (
           <b
             key={item.id}
@@ -50,6 +89,7 @@ function Track({ track, duration }: { track: TimelineTrack; duration: number }) 
                 setPlayhead(item.start)
               }
             }}
+            onPointerDown={(event) => event.stopPropagation()}
           >
             {item.label}
           </b>
@@ -62,16 +102,43 @@ function Track({ track, duration }: { track: TimelineTrack; duration: number }) 
 export function Timeline({ timeline }: { timeline: TimelineType | undefined }) {
   const playhead = useEditorStore((state) => state.playheadMs)
   const setPlayhead = useEditorStore((state) => state.setPlayhead)
+  const selection = useEditorStore((state) => state.highlightRange)
+  const setSelection = useEditorStore((state) => state.setHighlightRange)
+  const dragStart = useRef<number | null>(null)
   const duration = timeline?.duration_ms || 120000
 
+  const bounded = (value: number) => Math.max(0, Math.min(duration, value))
+  const updateSelection = (value: number) => {
+    if (dragStart.current === null) return
+    const next = bounded(value)
+    setSelection({ start_ms: Math.min(dragStart.current, next), end_ms: Math.max(dragStart.current, next) })
+  }
+
   return (
-    <section className="timeline-panel" onClick={(event) => {
-      const rect = event.currentTarget.getBoundingClientRect()
-      const ratio = (event.clientX - rect.left) / rect.width
-      setPlayhead(Math.round(duration * ratio))
-    }}>
+    <section className="timeline-panel">
       <div className="playhead" style={{ left: `${(playhead / Math.max(duration, 1)) * 100}%` }} />
-      {timeline?.tracks.map((track) => <Track key={track.id} track={track} duration={duration} />)}
+      {timeline?.tracks.map((track) => (
+        <Track
+          key={track.id}
+          track={track}
+          duration={duration}
+          selection={selection}
+          onRangeStart={(value) => {
+            dragStart.current = bounded(value)
+            setPlayhead(bounded(value))
+            setSelection(null)
+          }}
+          onRangeMove={updateSelection}
+          onRangeEnd={(value) => {
+            updateSelection(value)
+            if (dragStart.current !== null && Math.abs(bounded(value) - dragStart.current) < 100) {
+              setSelection(null)
+              setPlayhead(bounded(value))
+            }
+            dragStart.current = null
+          }}
+        />
+      ))}
     </section>
   )
 }

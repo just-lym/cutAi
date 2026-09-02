@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.models import (
+    AgentMessageRecord,
     AgentSession,
     Asset,
     CloudAPIUsage,
@@ -39,7 +40,7 @@ def _project_storage_paths(project_id: UUID) -> tuple[Path, Path]:
 
 async def _delete_project_records(db: AsyncSession, project_id: UUID) -> dict[str, int]:
     deleted: dict[str, int] = {}
-    for model in (CloudAPIUsage, AgentSession, EditPlan, Job, TimelineVersion, Asset):
+    for model in (CloudAPIUsage, AgentMessageRecord, AgentSession, EditPlan, Job, TimelineVersion, Asset):
         result = await db.execute(delete(model).where(model.project_id == project_id))
         deleted[model.__tablename__] = int(result.rowcount or 0)
     result = await db.execute(delete(Project).where(Project.id == project_id))

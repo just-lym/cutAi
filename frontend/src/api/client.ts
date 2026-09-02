@@ -30,6 +30,7 @@ export type Asset = {
   processing_status: string
   processing_step: string | null
   processing_error: string | null
+  metadata: Record<string, unknown> | null
 }
 
 export type Clip = {
@@ -39,6 +40,7 @@ export type Clip = {
   timeline_end_ms?: number
   source_in_ms?: number
   source_out_ms?: number
+  speed?: number
   volume?: number
   transform?: Record<string, unknown>
   effects?: Record<string, unknown>[]
@@ -110,6 +112,8 @@ export type AgentTraceStep = {
 export type ApprovalPayload = {
   approved_indices?: number[]
   rejected_indices?: number[]
+  feedback_note?: string
+  render_after_apply?: boolean
 }
 
 export type ApprovalResponse = {
@@ -118,6 +122,17 @@ export type ApprovalResponse = {
   rejected_count: number
   plan_status: string
   timeline_version: number | null
+  render_job_id: string | null
+  render_status: string | null
+}
+
+export type AgentHistoryItem = {
+  id: string
+  session_id: string
+  role: 'user' | 'assistant' | 'system' | string
+  content: string
+  metadata: Record<string, unknown> | null
+  created_at: string
 }
 
 export type UsageSummary = {
@@ -139,6 +154,8 @@ export type Job = {
   step: string | null
   error: string | null
   output: Record<string, unknown> | null
+  created_at?: string
+  completed_at?: string | null
 }
 
 export type RenderOptions = {
@@ -172,6 +189,13 @@ export type AgentStreamHandlers = {
   onToken?: (content: string) => void
   onDone?: (event: AgentStreamDone) => void
   onError?: (message: string) => void
+}
+
+export type AgentSelection = {
+  start_ms: number
+  end_ms: number
+  asset_id?: string
+  clip_ids?: string[]
 }
 
 const BASE = '/api'
@@ -228,11 +252,16 @@ function dispatchAgentEvent(
   }
 }
 
-async function streamAgentMessage(projectId: string, content: string, handlers: AgentStreamHandlers) {
+async function streamAgentMessage(
+  projectId: string,
+  content: string,
+  handlers: AgentStreamHandlers,
+  selection?: AgentSelection
+) {
   const res = await fetch(`${BASE}/projects/${projectId}/agent/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content, selection })
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -288,7 +317,10 @@ export const api = {
       request<TimelineVersion>(`/projects/${projectId}/timeline/commit`, {
         method: 'POST',
         body: JSON.stringify(payload)
-      })
+      }),
+    versions: (projectId: string) => request<TimelineVersion[]>(`/projects/${projectId}/timeline/versions`),
+    restore: (projectId: string, version: number) =>
+      request<TimelineVersion>(`/projects/${projectId}/timeline/restore/${version}`, { method: 'POST' })
   },
   subtitles: {
     update: (projectId: string, cueId: string, data: Partial<SubtitleCue>) =>
@@ -306,6 +338,8 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload ?? {})
       }),
+    reject: (planId: string) => request<{ ok: boolean }>(`/agent/runs/${planId}/reject`, { method: 'POST' }),
+    history: (projectId: string) => request<AgentHistoryItem[]>(`/projects/${projectId}/agent/history`),
     undo: (planId: string) =>
       request<{ ok: boolean; timeline_version: number; plan_status: string }>(`/agent/runs/${planId}/undo`, {
         method: 'POST'

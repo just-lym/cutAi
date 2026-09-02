@@ -53,6 +53,12 @@ export function Editor() {
   const [renderStartedAt, setRenderStartedAt] = useState<number | null>(null)
   const [renderElapsed, setRenderElapsed] = useState(0)
   const [renderEstimateSeconds, setRenderEstimateSeconds] = useState(0)
+  const [renderQuality, setRenderQuality] = useState<{
+    score: number | null
+    passed: boolean
+    issues: string[]
+    integratedLufs: number | null
+  } | null>(null)
   const activeBottomTab = useEditorStore((state) => state.activeBottomTab)
   const setBottomTab = useEditorStore((state) => state.setBottomTab)
   const setSubtitleCues = useEditorStore((state) => state.setSubtitleCues)
@@ -70,12 +76,28 @@ export function Editor() {
   const onSocketEvent = useCallback((event: { type: string; data: Record<string, unknown> }) => {
     if (event.type === 'job_progress') {
       const jobId = String(event.data.job_id ?? '')
-      const isCurrentRender = !currentRenderJobId || !jobId || jobId === currentRenderJobId
+      const isCurrentRender = Boolean(currentRenderJobId) && jobId === currentRenderJobId
       const estimated = Number(event.data.estimated_seconds ?? 0)
       if (isCurrentRender && estimated > 0) setRenderEstimateSeconds(estimated)
       const status = String(event.data.status ?? '')
       if (isCurrentRender && status === 'COMPLETED') {
-        const path = String((event.data.output as Record<string, unknown> | undefined)?.output_path ?? '')
+        const output = event.data.output as Record<string, unknown> | undefined
+        const path = String(output?.output_path ?? '')
+        const quality = output?.quality_report as Record<string, unknown> | undefined
+        const qualityIssues = Array.isArray(quality?.issues)
+          ? quality.issues
+              .map((item) => item as Record<string, unknown>)
+              .map((item) => String(item.detail ?? ''))
+              .filter(Boolean)
+              .slice(0, 3)
+          : []
+        const audioQuality = quality?.audio as Record<string, unknown> | undefined
+        setRenderQuality(quality ? {
+          score: typeof quality.score === 'number' ? quality.score : null,
+          passed: Boolean(quality.passed),
+          issues: qualityIssues,
+          integratedLufs: typeof audioQuality?.integrated_lufs === 'number' ? audioQuality.integrated_lufs : null
+        } : null)
         const doneLabel = currentRenderKind === 'preview' ? '预览' : '导出'
         setRenderStartedAt(null)
         setCurrentRenderJobId(null)
@@ -95,9 +117,16 @@ export function Editor() {
         setRenderNotice('导出已停止，半成品已清理。')
       }
     }
-    void queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
-    void queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
-    void queryClient.invalidateQueries({ queryKey: ['subtitles', projectId] })
+    if (event.type === 'timeline_updated') {
+      void queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['subtitles', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+    }
+    if (event.type === 'asset_deleted' || (event.type === 'job_progress' && event.data.asset_id)) {
+      void queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
+      void queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+    }
   }, [currentRenderJobId, currentRenderKind, projectId, queryClient])
 
   useWebSocket(projectId, onSocketEvent)
@@ -132,6 +161,7 @@ export function Editor() {
   const previewRender = useMutation({
     mutationFn: () => api.render.preview(projectId, renderOptions),
     onMutate: () => {
+      setRenderQuality(null)
       const estimate = currentEstimate
       setCurrentRenderKind('preview')
       setRenderEstimateSeconds(estimate)
@@ -154,6 +184,7 @@ export function Editor() {
   const exportRender = useMutation({
     mutationFn: () => api.render.exports(projectId, exportOptions),
     onMutate: () => {
+      setRenderQuality(null)
       const estimate = currentEstimate
       setCurrentRenderKind('export')
       setRenderEstimateSeconds(estimate)
@@ -301,6 +332,14 @@ export function Editor() {
           <span>{renderNotice}</span>
         ) : null}
       </nav>
+      {renderQuality ? (
+        <div className={renderQuality.passed ? 'render-quality passed' : 'render-quality needs-review'}>
+          <b>质量自评：{renderQuality.score === null ? '未评分' : `${renderQuality.score} 分`} ·
+            {renderQuality.passed ? '通过' : '建议复查'}</b>
+          {renderQuality.integratedLufs !== null ? <span>响度 {renderQuality.integratedLufs.toFixed(1)} LUFS</span> : null}
+          {renderQuality.issues.length ? <span>{renderQuality.issues.join('；')}</span> : null}
+        </div>
+      ) : null}
 
       <section className="editor-grid">
         <AssetPanel projectId={projectId} assets={assets.data ?? []} />
@@ -319,7 +358,12 @@ export function Editor() {
           {rightTab === 'inspector' ? (
             <InspectorPanel projectId={projectId} timeline={timeline.data?.timeline_json} assets={assets.data ?? []} />
           ) : (
-            <AgentPanel projectId={projectId} videoType={project.data?.video_type ?? 'TALKING_HEAD'} />
+            <AgentPanel
+              projectId={projectId}
+              videoType={project.data?.video_type ?? 'TALKING_HEAD'}
+              assets={assets.data ?? []}
+              timeline={timeline.data?.timeline_json}
+            />
           )}
         </aside>
       </section>
